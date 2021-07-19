@@ -33,32 +33,31 @@ class Log(
         get() = entries.size
 }
 
-class LogView(private var log: Log = Log(), private var pos: Int = log.length) {
+class LogView(private var log: Log = Log(), private var mysize: Int = log.length) {
 
-    fun logEntries() : List<LogEntry> = log.data.subList(0, pos)
+    fun logEntries() : List<LogEntry> = log.data.subList(0, mysize)
 
     /*
      * append to the existing log or fork if we are back in time (undo)
      */
     fun append(entry: LogEntry) {
-        if (pos == log.length)
+        if (mysize == log.length)
             log.append(entry)
         else {
-            log = log.forkAt(pos)
+            log = log.forkAt(mysize)
             log.append(entry)
 
         }
-        pos++
+        mysize++
     }
 
     /**
      * back to the previous tracker
      */
     fun back(): Boolean {
-        return if (pos > 0) {
-            val lastTracker = log.data[pos - 1].tracker
-            while (pos > 0 && log.data[--pos].tracker == lastTracker);
-            pos++
+        return if (mysize > 0) {
+            val lastTracker = log.data[mysize - 1].tracker
+            while (mysize > 0 && log.data[mysize - 1].tracker == lastTracker) mysize--
             true
         } else false
     }
@@ -67,10 +66,9 @@ class LogView(private var log: Log = Log(), private var pos: Int = log.length) {
      * forward to the next tracker
      */
     fun forward(): Boolean {
-        return if (pos < log.data.size) {
-            val lastTracker = log.data[pos - 1].tracker
-            while (pos < log.data.size && log.data[++pos].tracker == lastTracker);
-            pos++
+        return if (mysize < log.data.size) {
+            val lastTracker = log.data[mysize].tracker
+            while (mysize < log.data.size && log.data[mysize].tracker == lastTracker) mysize++
             true
         } else false
     }
@@ -180,8 +178,7 @@ fun <V, VR> BStream<V>.transform(transform: Bus.(V?) -> VR): BStream<VR> = BTran
 
 inline fun <V, reified V2, reified VR> BStream<V>.append(topicAndType: Pair<String, Class<V2>>, crossinline appender: (V?, V2?) -> VR): BStream<VR> = BTransformStream(this) { value -> appender(value, bus[topicAndType]) }
 
-
-fun <V> BStream<V>.write(topicAndType: Pair<String, Class<V>>) {
+fun <V> BStream<V>.write(topicAndType: Pair<String, Class<*>>) {
     BWriteStream(this, topicAndType.first)
 }
 
@@ -202,6 +199,7 @@ object Facts {
     val alltasks = "fact://alltasks" to AllTasks::class.java
     val availablerooms = "fact://availablerooms" to AvailableRooms::class.java
     val chosentask = "fact://chosentask" to ChosenTask::class.java
+    val thetask = "fact://thetask" to TheTask::class.java
 
     /*
     val availabletasks = "fact://availabletasks"
@@ -287,6 +285,14 @@ fun main() {
             .transform { (allRooms, chosenTask) -> calculateAvailableRooms(allRooms, chosenTask) }
             .write(Facts.availablerooms)
 
+    /**
+     *  a stream of 'chosentask' fact changes which sets 'the task'
+     */
+    bus.stream(Facts.chosentask)
+            .append(Facts.availablerooms) { chosenTask, availableRooms -> availableRooms to chosenTask }
+            .transform {  (availableRooms, chosenTask) -> calculateTheTask(availableRooms, chosenTask) }
+            .write(Facts.thetask)
+
 
     println("----------------------------------------------------------")
     println("                   READY BUS")
@@ -311,6 +317,7 @@ fun main() {
     println("Available Rooms after:")
     bus[Facts.availablerooms]?.rooms?.forEach { print("    $it") }
     println()
+    println("The Task: ${bus[Facts.thetask]}")
     println("----------------------------------------------------------")
     println("                   LOG                                    ")
     bus.logEntries().forEach(::println)
@@ -323,6 +330,7 @@ fun main() {
     println("Available Rooms after:")
     bus[Facts.availablerooms]?.rooms?.forEach { print("    $it") }
     println()
+    println("The Task: ${bus[Facts.thetask]}")
     println("----------------------------------------------------------")
     println("                   BACK LOG                                    ")
     bus.logEntries().forEach(::println)
@@ -335,6 +343,7 @@ fun main() {
     println("Available Rooms after:")
     bus[Facts.availablerooms]?.rooms?.forEach { print("    $it") }
     println()
+    println("The Task: ${bus[Facts.thetask]}")
     println("----------------------------------------------------------")
     println("                   FORWARD LOG                                    ")
     bus.logEntries().forEach(::println)
@@ -347,13 +356,14 @@ fun main() {
     println("Available Rooms after:")
     bus[Facts.availablerooms]?.rooms?.forEach { print("    $it") }
     println()
+    println("The Task: ${bus[Facts.thetask]}")
     println("----------------------------------------------------------")
     println("                   BACK LOG                                    ")
     bus.logEntries().forEach(::println)
 
 
     println("----------------------------------------------------------")
-    println("                   CHOSSING SOMETHING DIFFERENT - FORKING THE LOG!!!!               ")
+    println("                   CHOoSING SOMETHING DIFFERENT - FORKING THE LOG!!!!               ")
     println("----------------------------------------------------------")
     ChosenTask(`new windows`).also {
         bus.add(Action(
@@ -367,6 +377,7 @@ fun main() {
     println("Available Rooms after:")
     bus[Facts.availablerooms]?.rooms?.forEach { print("    $it") }
     println()
+    println("The Task: ${bus[Facts.thetask]}")
     println("----------------------------------------------------------")
     println("                   FORK LOG                                    ")
     bus.logEntries().forEach(::println)
@@ -381,6 +392,18 @@ fun calculateAvailableRooms(allRooms: AllRooms?, chosenTask: ChosenTask?): Avail
             else -> allRooms.rooms.filter { r -> r.possibleTasks.contains(chosenTask.task) }
         }
     }.let { AvailableRooms(it) }
+}
+
+fun calculateTheTask(availableRooms: AvailableRooms?, chosenTask: ChosenTask?): TheTask? {
+    return when (chosenTask) {
+        null -> when (availableRooms) {
+            null -> null
+            else -> availableRooms.rooms.flatMap { r -> r.possibleTasks }
+                    .toSet()
+                    .takeIf { it.size == 1 }?.let { TheTask(it.first()) }
+        }
+        else -> TheTask(chosenTask.task)
+    }
 }
 
 
@@ -398,6 +421,7 @@ data class AllRooms(val rooms: List<Room>)
 data class AllTasks(val tasks: List<Task>)
 data class AvailableRooms(val rooms: List<Room>)
 data class ChosenTask(val task: Task)
+data class TheTask(val task: Task)
 
 
 inline fun <reified T> String.parse(): T {
