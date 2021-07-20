@@ -1,9 +1,11 @@
 package scott.factbus
 
 import com.fasterxml.jackson.module.kotlin.jacksonObjectMapper
+import java.lang.reflect.ParameterizedType
 import java.util.*
 import java.util.UUID.randomUUID
 import kotlin.reflect.full.memberProperties
+import kotlin.reflect.jvm.javaField
 
 data class Tracker(val id :  UUID, val name : String)
 data class LogEntry(val key: String, val data: String?, val tracker: Tracker)
@@ -15,8 +17,10 @@ class Log(
     val data: List<LogEntry>
         get() = entries
 
-    fun append(entry: LogEntry) {
+    fun append(entry: LogEntry, callback: () -> Unit) {
+        println("Writing ${entry.key} ${entry.data}")
         entries += (entry)
+        callback()
         consumers.forEach { consume -> consume(entry) }
     }
 
@@ -27,7 +31,7 @@ class Log(
     /**
      * create a new log so that pos is the most recent value
      */
-    fun forkAt(pos: Int) = Log(entries.subList(0, pos + 1), consumers = consumers)
+    fun forkAt(pos: Int) = Log(entries.subList(0, pos), consumers = consumers)
 
     val length: Int
         get() = entries.size
@@ -42,13 +46,11 @@ class LogView(private var log: Log = Log(), private var mysize: Int = log.length
      */
     fun append(entry: LogEntry) {
         if (mysize == log.length)
-            log.append(entry)
+            log.append(entry) { mysize++ }
         else {
             log = log.forkAt(mysize)
-            log.append(entry)
-
+            log.append(entry) { mysize++ }
         }
-        mysize++
     }
 
     /**
@@ -73,11 +75,12 @@ class LogView(private var log: Log = Log(), private var mysize: Int = log.length
         } else false
     }
 
-    fun materialize(): Map<String, String?> = logEntries().map { entry -> entry.key to entry.data }.toMap()
+    fun materialize(): Map<String, LogEntry?> = logEntries().associateBy { entry -> entry.key }
 
     fun add(consumer: (LogEntry) -> Unit) = log.add(consumer)
 }
 
+data class FactTopic<T>(val url : String)
 
 class Bus(private val logView: LogView = LogView()) {
 
@@ -88,11 +91,15 @@ class Bus(private val logView: LogView = LogView()) {
     fun add(action: Action) {
         val key = action.topic
         val data = action.data?.toJson()
-        logView.append(LogEntry(key = key, data = data, tracker = Tracker(action.id, action.name)))
-        map += (key to data)
+        val newLogEntry = LogEntry(key = key, data = data, tracker = Tracker(action.id, action.name))
+        val existingEntry = map[action.topic]
+        if (existingEntry?.tracker != newLogEntry.tracker || existingEntry.data != newLogEntry.data) {
+            logView.append(newLogEntry)
+            map += (key to newLogEntry)
+        }
     }
 
-    inline operator fun <reified V> get(topic: FactTopic<V>): V? = map[topic.url]?.parse<V>()
+    inline operator fun <reified V> get(topic: FactTopic<V>): V? = map[topic.url]?.data?.parse<V>()
 
     fun back() = if (logView.back()) true.also { map = logView.materialize() } else false
 
@@ -106,52 +113,46 @@ class Action(val id: UUID = randomUUID(), val name: String, val data: Any?, val 
 fun action(data : Any, topic : String = getTopic(data), tracker : Tracker) = Action(tracker.id, tracker.name, data, topic = topic)
 fun action(topic : String, tracker : Tracker) = Action(tracker.id, tracker.name, null, topic = topic)
 
-class StreamData<V>(val data : V?, val tracker : Tracker)
+class StreamItem<V>(val data : V?, val logEntry : LogEntry)
 
 interface BStream<V> {
     val bus: Bus
-    fun add(child : (StreamData<V>) -> Unit)
-    fun stream(data : StreamData<V>)
+    fun add(child : (StreamItem<V>) -> Unit)
+    fun stream(data : StreamItem<V>)
 }
 
-class BTopicStream<V>(private val type : Class<V>, override val bus: Bus, private val topic: String) : BStream<V> {
-    private var children = emptyList<(StreamData<V>) -> Unit>()
-    init {
-        bus.subscribe { logEntry ->
-            if (logEntry.key == topic) {
-                println("BTopicStream processing ${logEntry.key}")
-                stream(StreamData(data = logEntry.data?.parse(type), tracker =  logEntry.tracker))
-            }
-//            else println("BTopicStream $topic: ignoring ${logEntry.key}")
-        }
-    }
 
-    override fun add(child : (StreamData<V>) -> Unit) {
+
+class BTopicStream<V>(bus : Bus) : BStream<V> {
+    override val bus: Bus = bus
+    private var children = emptyList<(StreamItem<V>) -> Unit>()
+    override fun add(child : (StreamItem<V>) -> Unit) {
         children += child
     }
 
-    override fun stream(data: StreamData<V>) {
+    override fun stream(data: StreamItem<V>) {
+        println("Streaming ${data.logEntry.key}  ${data.logEntry.data}")
         children.forEach { callChild ->  callChild(data) }
     }
 }
 
 class BTransformStream<VR,V>(source: BStream<V>, private val transformer: Bus.(V?) -> VR) : BStream<VR> {
     override val bus: Bus = source.bus
-    private var children = emptyList<(StreamData<VR>) -> Unit>()
+    private var children = emptyList<(StreamItem<VR>) -> Unit>()
     init {
         source.add { streamData ->
-            println("BTransformStream: received ${streamData.data}")
+//            println("BTransformStream: received ${streamData.data}")
             bus.transformer(streamData.data).let {
-                stream(StreamData(data = it, tracker = streamData.tracker))
+                stream(StreamItem(data = it, logEntry = streamData.logEntry))
             }
         }
     }
 
-    override fun add(child : (StreamData<VR>) -> Unit) {
+    override fun add(child : (StreamItem<VR>) -> Unit) {
         children += child
     }
 
-    override fun stream(data: StreamData<VR>) {
+    override fun stream(data: StreamItem<VR>) {
         children.forEach { callChild ->  callChild(data) }
     }
 
@@ -161,18 +162,47 @@ class BWriteStream<V>(source: BStream<V>, private val topic: String) : BStream<V
     override val bus: Bus = source.bus
     init {
         source.add { streamData ->
-            println("BWriteStream: received ${streamData.data}")
             when(streamData.data) {
-                null -> bus.add(action(topic = topic, tracker = streamData.tracker))
-                else -> bus.add(action(topic = topic, data = streamData.data, tracker = streamData.tracker))
+                null -> bus.add(action(topic = topic, tracker = streamData.logEntry.tracker))
+                else -> bus.add(action(topic = topic, data = streamData.data, tracker = streamData.logEntry.tracker))
             }
         }
     }
-    override fun add(child : (StreamData<V>) -> Unit) { /* NOOP */ }
-    override fun stream(data: StreamData<V>) { /* NOOP */ }
+    override fun add(child : (StreamItem<V>) -> Unit) { /* NOOP */ }
+    override fun stream(data: StreamItem<V>) { /* NOOP */ }
 }
 
-inline fun <reified V> Bus.stream(topic: FactTopic<V>): BStream<V> = BTopicStream(V::class.java, this, topic.url)
+inline fun <reified V1> Bus.stream(topic1: FactTopic<V1>): BStream<StreamData1<V1?>> {
+    return BTopicStream<StreamData1<V1?>>(this).also {
+        subscribe { logEntry ->
+            if (logEntry.key == topic1.url)
+                it.stream(StreamItem(logEntry = logEntry, data = StreamData1(logEntry.data?.parse<V1>())))
+        }
+    }
+}
+
+inline fun <reified V1,reified V2> Bus.stream(topic1: FactTopic<V1>, topic2: FactTopic<V2>): BStream<StreamData2<V1?,V2?>> {
+    return BTopicStream<StreamData2<V1?,V2?>>(this).also {
+        subscribe { logEntry ->
+            if (logEntry.key == topic1.url)
+                it.stream(StreamItem(data = StreamData2(logEntry.data?.parse<V1>(), get(topic2)), logEntry = logEntry))
+            else if (logEntry.key == topic2.url)
+                it.stream(StreamItem(data = StreamData2(get(topic1), logEntry.data?.parse<V2>()), logEntry = logEntry))
+        }
+    }
+}
+
+inline fun <reified V1,reified V2,reified V3> Bus.stream(topic1: FactTopic<V1>, topic2: FactTopic<V2>, topic3: FactTopic<V3>): BStream<StreamData3<V1?,V2?,V3?>> {
+    return BTopicStream<StreamData3<V1?,V2?,V3?>>(this).also {
+        subscribe { logEntry ->
+            when {
+                logEntry.key == topic1.url -> it.stream(StreamItem(data = StreamData3(logEntry.data?.parse<V1>(), get(topic2), get(topic3)), logEntry = logEntry))
+                logEntry.key == topic2.url -> it.stream(StreamItem(data = StreamData3(get(topic1), logEntry.data?.parse<V2>(), get(topic3)), logEntry = logEntry))
+                logEntry.key == topic3.url -> it.stream(StreamItem(data = StreamData3(get(topic1), get(topic2), logEntry.data?.parse<V3>()), logEntry = logEntry))
+            }
+        }
+    }
+}
 
 fun <V, VR> BStream<V>.transform(transform: Bus.(V?) -> VR): BStream<VR> = BTransformStream(this, transform)
 
@@ -184,340 +214,16 @@ fun <V> BStream<V>.write(topic: FactTopic<out V>) {
 
 fun getTopic(fact: Any): String {
     return Facts::class.memberProperties.fold(emptyList<String>()) { acc, prop ->
-        (prop.invoke(Facts) as Pair<String, Class<*>>).let { propValue ->
             when {
-                propValue.second == fact::class.java -> acc + propValue.first
+                (prop.javaField?.genericType as? ParameterizedType)?.actualTypeArguments!![0] == fact::class.java -> acc + (prop.invoke(Facts) as FactTopic<*>).url
                 else -> acc
             }
-        }
-
     }.first()
 }
-
-/*****************************************************************************************************************************************
-   application code
-********************************************************************************************************************************************/
-
-fun Bus.add(data : Any) {
-    add(Action(
-            name = "n/a",
-            data = data,
-            topic = getTopic(data)
-    ))
-}
-
-data class FactTopic<T>(val url : String)
-
-object Facts {
-    val allrooms = FactTopic<AllRooms>("fact://allrooms")
-    val alltasks = FactTopic<AllTasks>("fact://alltasks")
-    val availablerooms = FactTopic<AvailableRooms>("fact://availablerooms")
-    val availabletasks = FactTopic<AvailableTasks>("fact://availabletasks")
-    val chosentask = FactTopic<ChosenTask>("fact://chosentask")
-    val chosenrooms = FactTopic<ChosenRooms>("fact://chosenrooms")
-    val thetask = FactTopic<TheTask>("fact://thetask")
-    val therooms = FactTopic<TheRooms>("fact://therooms")
-
-    /*
-    val availabletasks = "fact://availabletasks"
-    val thetask = "fact://thetask"
-    val therooms = "fact://therooms"
-    val chosenrooms = "fact://chosenrooms"
-
-     */
-}
-
-fun main() {
-
-    /*
-      all rooms
-      all tasks
-      available rooms
-      available tasks
-      chosen task
-      chosen room
-      the task
-      the room
-     */
-
-    val bus = Bus()
-
-    val `new windows` = Task("new windows")
-    val `new doors` = Task("new doors")
-
-    val `all tasks` = listOf(`new windows`, `new doors`).let { AllTasks(it) }.also {
-        bus.add(it)
-    }
-
-    val `living room` = Room("living room", listOf(`new windows`))
-    val hall = Room("hall", listOf(`new doors`))
-
-    val `all rooms` = listOf(`living room`, hall).let { AllRooms(it) }.also {
-        bus.add(it)
-    }
-
-    /*
-    val `ask what rooms` = Question(
-            name = "what rooms",
-            options = "availablerooms://",
-            answer = null,
-            factToAnswer = "fact://what rooms",
-    ).also {
-        bus.add(it)
-    }
-
-    val `ask what task` = Question(
-            name = "what task",
-            options = "availabletasks://",
-            answer = null,
-            factToAnswer = "fact://what task",
-    ).also {
-        bus.add(it)
-    }
-*/
-
-   /*
-    * AVAILABLE ROOMS   ===================================================
-    */
-    /**
-     *  a stream of 'allrooms' fact changes which recalculates the available rooms for choosing
-     */
-    bus.stream(Facts.allrooms)
-            .append(Facts.chosentask) { allRooms, chosenTask -> allRooms to chosenTask }
-            .transform { (allRooms, chosenTask) -> calculateAvailableRooms(allRooms, chosenTask) }
-            .write(Facts.availablerooms)
-    /**
-     *  a stream of 'chosentask' fact changes which recalculates the available rooms for choosing
-     */
-    bus.stream(Facts.chosentask)
-            .append(Facts.allrooms) { chosenTask, allRooms -> allRooms to chosenTask }
-            .transform { (allRooms, chosenTask) -> calculateAvailableRooms(allRooms, chosenTask) }
-            .write(Facts.availablerooms)
-
-    /*
-     * AVAILABLE TASKS   ===================================================
-     */
-    /**
-     *  a stream of 'alltasks' fact changes which recalculates the available tasks for choosing
-     */
-    bus.stream(Facts.alltasks)
-            .append(Facts.chosenrooms) { allTasks, chosenRooms -> allTasks to chosenRooms }
-            .transform { (allTasks, chosenRooms) -> calculateAvailableTasks(allTasks, chosenRooms) }
-            .write(Facts.availabletasks)
-
-    /**
-     *  a stream of 'chosenroom' fact changes which recalculates the available tasks for choosing
-     */
-    bus.stream(Facts.chosenrooms)
-            .append(Facts.alltasks) { chosenRooms, allTasks -> allTasks to chosenRooms }
-            .transform { (allRooms, chosenTask) -> calculateAvailableTasks(allRooms, chosenTask) }
-            .write(Facts.availabletasks)
-
-    /*
-     * THE TASK   ===================================================
-     */
-    /**
-     *  a stream of 'chosentask' fact changes which sets 'the task'
-     */
-    bus.stream(Facts.chosentask)
-            .append(Facts.availablerooms) { chosenTask, availableRooms -> availableRooms to chosenTask }
-            .transform { (availableRooms, chosenTask) -> calculateTheTask(availableRooms, chosenTask) }
-            .write(Facts.thetask)
-    /**
-     *  a stream of 'availablerooms' fact changes which sets 'the task'
-     */
-    bus.stream(Facts.availablerooms)
-            .append(Facts.chosentask) { availableRooms, chosenTask -> availableRooms to chosenTask }
-            .transform { (availableRooms, chosenTask) -> calculateTheTask(availableRooms, chosenTask) }
-            .write(Facts.thetask)
-
-    /*
-     * THE ROOMS   ===================================================
-     */
-    /**
-     *  a stream of 'chosentask' fact changes which sets 'the task'
-     */
-    bus.stream(Facts.chosenrooms)
-            .append(Facts.allrooms) { chosenRooms, allRooms -> chosenRooms to allRooms}
-            .append(Facts.availabletasks) { (chosenRooms, allRooms) , availableTasks -> Triple(chosenRooms, allRooms, availableTasks) }
-            .transform { (chosenRooms, allRooms, availableTasks) -> calculateTheRooms(allRooms, availableTasks, chosenRooms) }
-            .write(Facts.therooms)
-    /**
-     *  a stream of 'availablerooms' fact changes which sets 'the task'
-     *  IF THE CHOSEN ROOOM CHANGES THEN THE AVAILABLE TASKS CHANGES WITH IT - SO WE DON#T NEED THIS ONE?????
-     */
-    bus.stream(Facts.availabletasks)
-            .append(Facts.chosenrooms) { availableTasks, chosenRooms -> availableTasks to chosenRooms }
-            .append(Facts.allrooms) { (availableTasks, chosenRooms), allRooms -> Triple(availableTasks, chosenRooms, allRooms)}
-            .transform { (availableTasks, chosenRooms, allRooms) -> calculateTheRooms(allRooms, availableTasks, chosenRooms) }
-            .write(Facts.therooms)
-
-
-    println("----------------------------------------------------------")
-    println("                   READY BUS")
-    bus.map.forEach { (k, v) -> println("$k  =>  $v")}
-    println()
-    println("----------------------------------------------------------")
-    println("                   READY LOG")
-    bus.logEntries().forEach(::println)
-
-    println()
-    println()
-
-
-    ChosenTask(`new doors`).also {
-        bus.add(Action(
-                name = "choose task",
-                data = it,
-                topic = getTopic(it)
-        ))
-    }
-    println("------------  RESULT ---------------------------------------")
-    println("Available Rooms after:")
-    bus[Facts.availablerooms]?.rooms?.forEach { print("    $it") }
-    println()
-    println("The Task: ${bus[Facts.thetask]}")
-    println("----------------------------------------------------------")
-    println("                   LOG                                    ")
-    bus.logEntries().forEach(::println)
-
-    println()
-    println()
-
-    bus.back()
-    println("------------  BACK RESULT ---------------------------------------")
-    println("Available Rooms after:")
-    bus[Facts.availablerooms]?.rooms?.forEach { print("    $it") }
-    println()
-    println("The Task: ${bus[Facts.thetask]}")
-    println("----------------------------------------------------------")
-    println("                   BACK LOG                                    ")
-    bus.logEntries().forEach(::println)
-
-    println()
-    println()
-
-    bus.forward()
-    println("------------  FORWARD RESULT ---------------------------------------")
-    println("Available Rooms after:")
-    bus[Facts.availablerooms]?.rooms?.forEach { print("    $it") }
-    println()
-    println("The Task: ${bus[Facts.thetask]}")
-    println("----------------------------------------------------------")
-    println("                   FORWARD LOG                                    ")
-    bus.logEntries().forEach(::println)
-
-    println()
-    println()
-
-    bus.back()
-    println("------------  BACK RESULT ---------------------------------------")
-    println("Available Rooms after:")
-    bus[Facts.availablerooms]?.rooms?.forEach { print("    $it") }
-    println()
-    println("The Task: ${bus[Facts.thetask]}")
-    println("----------------------------------------------------------")
-    println("                   BACK LOG                                    ")
-    bus.logEntries().forEach(::println)
-
-
-    println("----------------------------------------------------------")
-    println("                   CHOoSING SOMETHING DIFFERENT - FORKING THE LOG!!!!               ")
-    println("----------------------------------------------------------")
-    ChosenTask(`new windows`).also {
-        bus.add(Action(
-                name = "choose task",
-                data = it,
-                topic = getTopic(it)
-        ))
-    }
-
-    println("------------  FORK RESULT ---------------------------------------")
-    println("Available Rooms after:")
-    bus[Facts.availablerooms]?.rooms?.forEach { print("    $it") }
-    println()
-    println("The Task: ${bus[Facts.thetask]}")
-    println("----------------------------------------------------------")
-    println("                   FORK LOG                                    ")
-    bus.logEntries().forEach(::println)
-
-}
-
-fun calculateAvailableRooms(allRooms: AllRooms?, chosenTask: ChosenTask?): AvailableRooms {
-    return when (allRooms) {
-        null -> emptyList()
-        else -> when (chosenTask) {
-            null -> allRooms.rooms
-            else -> allRooms.rooms.filter { r -> r.possibleTasks.contains(chosenTask.task) }
-        }
-    }.let { AvailableRooms(it) }
-}
-
-fun calculateAvailableTasks(allTasks: AllTasks?, chosenRooms: ChosenRooms?) : AvailableTasks {
-    return when (allTasks) {
-        null -> emptyList()
-        else -> when (chosenRooms) {
-            null -> allTasks.tasks
-            else ->  chosenRooms.rooms.flatMap(Room::possibleTasks).toSet().toList()
-        }
-    }.let { AvailableTasks(it) }
-
-}
-
-fun calculateTheTask(availableRooms: AvailableRooms?, chosenTask: ChosenTask?): TheTask? {
-    return when (chosenTask) {
-        null -> when (availableRooms) {
-            null -> null
-            else -> availableRooms.rooms.flatMap { r -> r.possibleTasks }
-                    .toSet()
-                    .takeIf { it.size == 1 }?.let { TheTask(it.first()) }
-        }
-        else -> TheTask(chosenTask.task)
-    }
-}
-
-fun calculateTheRooms(allRooms : AllRooms?, availableTasks: AvailableTasks?, chosenRooms: ChosenRooms?): TheRooms? {
-    return when(allRooms) {
-        null -> null
-        else -> when (chosenRooms) {
-            null -> when (availableTasks) {
-                null -> null
-                else -> allRooms.rooms.filter { r -> (availableTasks.tasks.toSet() - r.possibleTasks).size < availableTasks.tasks.size  }.let { rooms ->
-                    rooms.takeUnless { it.isEmpty() }?.let { TheRooms(it) }
-                }
-            }
-            else -> TheRooms(chosenRooms.rooms)
-        }
-    }
-}
-
-
-class Question(name: String,
-               val options: String, //the topic where we find the options for the question
-               val answer: Any?, //the data of the answer (the question should be republished on the bus with it's answer)
-               val factToAnswer: String //the topic to publish the answer on in it'S own right
-)
-
-
-data class Room(val name: String, val possibleTasks: List<Task> = mutableListOf())
-data class Task(val name: String)
-
-data class AllRooms(val rooms: List<Room>)
-data class AllTasks(val tasks: List<Task>)
-data class AvailableRooms(val rooms: List<Room>)
-data class AvailableTasks(val tasks: List<Task>)
-data class ChosenTask(val task: Task)
-data class ChosenRooms(val rooms: List<Room>)
-data class TheTask(val task: Task)
-data class TheRooms(val rooms: List<Room>)
 
 
 inline fun <reified T> String.parse(): T {
   return jacksonObjectMapper().readValue(this, T::class.java)
-}
-
-inline fun <T> String.parse(type : Class<T>): T {
-    return jacksonObjectMapper().readValue(this, type)
 }
 
 
@@ -531,3 +237,25 @@ operator fun <T> Pair<*, T>?.component2() = this?.component2()
 operator fun <T> Triple<T,*,*>?.component1() = this?.component1()
 operator fun <T> Triple<*,T,*>?.component2() = this?.component2()
 operator fun <T> Triple<*,*,T>?.component3() = this?.component3()
+
+interface TopicAggregate
+data class TopicAggregate2<V1,V2>(val t1 : FactTopic<V1>, val t2 : FactTopic<V2>) : TopicAggregate
+
+
+interface StreamData {
+    fun from(topicAggregate : TopicAggregate)
+}
+
+class StreamData1<V1>(val v1 : V1) {
+    operator fun component1() = this.v1
+}
+operator fun <T> StreamData1<T>?.component1() = this?.component1()
+
+data class StreamData2<V1,V2>(val v1 : V1, val v2 : V2)
+operator fun <T> StreamData2<T,*>?.component1() = this?.component1()
+operator fun <T> StreamData2<*,T>?.component2() = this?.component2()
+
+data class StreamData3<V1,V2,V3>(val v1 : V1, val v2 : V2, val v3 : V3)
+operator fun <T> StreamData3<T,*,*>?.component1() = this?.component1()
+operator fun <T> StreamData3<*,T,*>?.component2() = this?.component2()
+operator fun <T> StreamData3<*,*,T>?.component3() = this?.component3()
