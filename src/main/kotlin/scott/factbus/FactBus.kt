@@ -92,7 +92,7 @@ class Bus(private val logView: LogView = LogView()) {
         map += (key to data)
     }
 
-    inline operator fun <reified V> get(keyAndType: Pair<String, Class<V>>): V? = map[keyAndType.first]?.parse<V>()
+    inline operator fun <reified V> get(topic: FactTopic<V>): V? = map[topic.url]?.parse<V>()
 
     fun back() = if (logView.back()) true.also { map = logView.materialize() } else false
 
@@ -172,14 +172,14 @@ class BWriteStream<V>(source: BStream<V>, private val topic: String) : BStream<V
     override fun stream(data: StreamData<V>) { /* NOOP */ }
 }
 
-inline fun <reified V> Bus.stream(topicAndType: Pair<String, Class<V>>): BStream<V> = BTopicStream(V::class.java, this, topicAndType.first)
+inline fun <reified V> Bus.stream(topic: FactTopic<V>): BStream<V> = BTopicStream(V::class.java, this, topic.url)
 
 fun <V, VR> BStream<V>.transform(transform: Bus.(V?) -> VR): BStream<VR> = BTransformStream(this, transform)
 
-inline fun <V, reified V2, reified VR> BStream<V>.append(topicAndType: Pair<String, Class<V2>>, crossinline appender: (V?, V2?) -> VR): BStream<VR> = BTransformStream(this) { value -> appender(value, bus[topicAndType]) }
+inline fun <V, reified V2, VR> BStream<V>.append(topic: FactTopic<V2>, crossinline appender: (V?, V2?) -> VR): BStream<VR> = BTransformStream(this) { value -> appender(value, bus[topic]) }
 
-fun <V> BStream<V>.write(topicAndType: Pair<String, Class<*>>) {
-    BWriteStream(this, topicAndType.first)
+fun <V> BStream<V>.write(topic: FactTopic<out V>) {
+    BWriteStream(this, topic.url)
 }
 
 fun getTopic(fact: Any): String {
@@ -194,21 +194,9 @@ fun getTopic(fact: Any): String {
     }.first()
 }
 
-object Facts {
-    val allrooms = "fact://allrooms" to AllRooms::class.java
-    val alltasks = "fact://alltasks" to AllTasks::class.java
-    val availablerooms = "fact://availablerooms" to AvailableRooms::class.java
-    val chosentask = "fact://chosentask" to ChosenTask::class.java
-    val thetask = "fact://thetask" to TheTask::class.java
-
-    /*
-    val availabletasks = "fact://availabletasks"
-    val thetask = "fact://thetask"
-    val therooms = "fact://therooms"
-    val chosenrooms = "fact://chosenrooms"
-
-     */
-}
+/*****************************************************************************************************************************************
+   application code
+********************************************************************************************************************************************/
 
 fun Bus.add(data : Any) {
     add(Action(
@@ -218,6 +206,26 @@ fun Bus.add(data : Any) {
     ))
 }
 
+data class FactTopic<T>(val url : String)
+
+object Facts {
+    val allrooms = FactTopic<AllRooms>("fact://allrooms")
+    val alltasks = FactTopic<AllTasks>("fact://alltasks")
+    val availablerooms = FactTopic<AvailableRooms>("fact://availablerooms")
+    val availabletasks = FactTopic<AvailableTasks>("fact://availabletasks")
+    val chosentask = FactTopic<ChosenTask>("fact://chosentask")
+    val chosenrooms = FactTopic<ChosenRooms>("fact://chosenrooms")
+    val thetask = FactTopic<TheTask>("fact://thetask")
+    val therooms = FactTopic<TheRooms>("fact://therooms")
+
+    /*
+    val availabletasks = "fact://availabletasks"
+    val thetask = "fact://thetask"
+    val therooms = "fact://therooms"
+    val chosenrooms = "fact://chosenrooms"
+
+     */
+}
 
 fun main() {
 
@@ -268,7 +276,9 @@ fun main() {
     }
 */
 
-
+   /*
+    * AVAILABLE ROOMS   ===================================================
+    */
     /**
      *  a stream of 'allrooms' fact changes which recalculates the available rooms for choosing
      */
@@ -276,7 +286,6 @@ fun main() {
             .append(Facts.chosentask) { allRooms, chosenTask -> allRooms to chosenTask }
             .transform { (allRooms, chosenTask) -> calculateAvailableRooms(allRooms, chosenTask) }
             .write(Facts.availablerooms)
-
     /**
      *  a stream of 'chosentask' fact changes which recalculates the available rooms for choosing
      */
@@ -285,13 +294,63 @@ fun main() {
             .transform { (allRooms, chosenTask) -> calculateAvailableRooms(allRooms, chosenTask) }
             .write(Facts.availablerooms)
 
+    /*
+     * AVAILABLE TASKS   ===================================================
+     */
+    /**
+     *  a stream of 'alltasks' fact changes which recalculates the available tasks for choosing
+     */
+    bus.stream(Facts.alltasks)
+            .append(Facts.chosenrooms) { allTasks, chosenRooms -> allTasks to chosenRooms }
+            .transform { (allTasks, chosenRooms) -> calculateAvailableTasks(allTasks, chosenRooms) }
+            .write(Facts.availabletasks)
+
+    /**
+     *  a stream of 'chosenroom' fact changes which recalculates the available tasks for choosing
+     */
+    bus.stream(Facts.chosenrooms)
+            .append(Facts.alltasks) { chosenRooms, allTasks -> allTasks to chosenRooms }
+            .transform { (allRooms, chosenTask) -> calculateAvailableTasks(allRooms, chosenTask) }
+            .write(Facts.availabletasks)
+
+    /*
+     * THE TASK   ===================================================
+     */
     /**
      *  a stream of 'chosentask' fact changes which sets 'the task'
      */
     bus.stream(Facts.chosentask)
             .append(Facts.availablerooms) { chosenTask, availableRooms -> availableRooms to chosenTask }
-            .transform {  (availableRooms, chosenTask) -> calculateTheTask(availableRooms, chosenTask) }
+            .transform { (availableRooms, chosenTask) -> calculateTheTask(availableRooms, chosenTask) }
             .write(Facts.thetask)
+    /**
+     *  a stream of 'availablerooms' fact changes which sets 'the task'
+     */
+    bus.stream(Facts.availablerooms)
+            .append(Facts.chosentask) { availableRooms, chosenTask -> availableRooms to chosenTask }
+            .transform { (availableRooms, chosenTask) -> calculateTheTask(availableRooms, chosenTask) }
+            .write(Facts.thetask)
+
+    /*
+     * THE ROOMS   ===================================================
+     */
+    /**
+     *  a stream of 'chosentask' fact changes which sets 'the task'
+     */
+    bus.stream(Facts.chosenrooms)
+            .append(Facts.allrooms) { chosenRooms, allRooms -> chosenRooms to allRooms}
+            .append(Facts.availabletasks) { (chosenRooms, allRooms) , availableTasks -> Triple(chosenRooms, allRooms, availableTasks) }
+            .transform { (chosenRooms, allRooms, availableTasks) -> calculateTheRooms(allRooms, availableTasks, chosenRooms) }
+            .write(Facts.therooms)
+    /**
+     *  a stream of 'availablerooms' fact changes which sets 'the task'
+     *  IF THE CHOSEN ROOOM CHANGES THEN THE AVAILABLE TASKS CHANGES WITH IT - SO WE DON#T NEED THIS ONE?????
+     */
+    bus.stream(Facts.availabletasks)
+            .append(Facts.chosenrooms) { availableTasks, chosenRooms -> availableTasks to chosenRooms }
+            .append(Facts.allrooms) { (availableTasks, chosenRooms), allRooms -> Triple(availableTasks, chosenRooms, allRooms)}
+            .transform { (availableTasks, chosenRooms, allRooms) -> calculateTheRooms(allRooms, availableTasks, chosenRooms) }
+            .write(Facts.therooms)
 
 
     println("----------------------------------------------------------")
@@ -394,6 +453,17 @@ fun calculateAvailableRooms(allRooms: AllRooms?, chosenTask: ChosenTask?): Avail
     }.let { AvailableRooms(it) }
 }
 
+fun calculateAvailableTasks(allTasks: AllTasks?, chosenRooms: ChosenRooms?) : AvailableTasks {
+    return when (allTasks) {
+        null -> emptyList()
+        else -> when (chosenRooms) {
+            null -> allTasks.tasks
+            else ->  chosenRooms.rooms.flatMap(Room::possibleTasks).toSet().toList()
+        }
+    }.let { AvailableTasks(it) }
+
+}
+
 fun calculateTheTask(availableRooms: AvailableRooms?, chosenTask: ChosenTask?): TheTask? {
     return when (chosenTask) {
         null -> when (availableRooms) {
@@ -403,6 +473,21 @@ fun calculateTheTask(availableRooms: AvailableRooms?, chosenTask: ChosenTask?): 
                     .takeIf { it.size == 1 }?.let { TheTask(it.first()) }
         }
         else -> TheTask(chosenTask.task)
+    }
+}
+
+fun calculateTheRooms(allRooms : AllRooms?, availableTasks: AvailableTasks?, chosenRooms: ChosenRooms?): TheRooms? {
+    return when(allRooms) {
+        null -> null
+        else -> when (chosenRooms) {
+            null -> when (availableTasks) {
+                null -> null
+                else -> allRooms.rooms.filter { r -> (availableTasks.tasks.toSet() - r.possibleTasks).size < availableTasks.tasks.size  }.let { rooms ->
+                    rooms.takeUnless { it.isEmpty() }?.let { TheRooms(it) }
+                }
+            }
+            else -> TheRooms(chosenRooms.rooms)
+        }
     }
 }
 
@@ -420,8 +505,11 @@ data class Task(val name: String)
 data class AllRooms(val rooms: List<Room>)
 data class AllTasks(val tasks: List<Task>)
 data class AvailableRooms(val rooms: List<Room>)
+data class AvailableTasks(val tasks: List<Task>)
 data class ChosenTask(val task: Task)
+data class ChosenRooms(val rooms: List<Room>)
 data class TheTask(val task: Task)
+data class TheRooms(val rooms: List<Room>)
 
 
 inline fun <reified T> String.parse(): T {
@@ -439,3 +527,7 @@ inline fun Any.toJson(): String {
 
 operator fun <T> Pair<T, *>?.component1() = this?.component1()
 operator fun <T> Pair<*, T>?.component2() = this?.component2()
+
+operator fun <T> Triple<T,*,*>?.component1() = this?.component1()
+operator fun <T> Triple<*,T,*>?.component2() = this?.component2()
+operator fun <T> Triple<*,*,T>?.component3() = this?.component3()
