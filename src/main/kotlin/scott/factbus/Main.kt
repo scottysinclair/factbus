@@ -43,12 +43,6 @@ fun main() {
     val `all rooms` = listOf(`living room`, hall).let { AllRooms(it) }
 
 
-    /*
-     * propulate
-     */
-    bus.add("all rooms", `all rooms`)
-    bus.add("all tasks", `all tasks`)
-
     /**
      *  recalculate available rooms when allrooms or chosentask changes
      */
@@ -74,9 +68,15 @@ fun main() {
     /**
      *  recalculate therooms when chosenrooms, allrooms or availabletasks changes
      */
-    bus.stream(Facts.chosenrooms,Facts.allrooms, Facts.availabletasks)
-            .transform { (chosenRooms, allRooms, availableTasks) -> calculateTheRooms(allRooms, availableTasks, chosenRooms) }
+    bus.stream(Facts.chosenrooms,Facts.allrooms, Facts.chosentask)
+            .transform { (chosenRooms, allRooms, chosenTask) -> calculateTheRooms(allRooms, chosenTask, chosenRooms) }
             .write(Facts.therooms)
+
+    /*
+     * populate
+     */
+    bus.add("all rooms", `all rooms`)
+    bus.add("all tasks", `all tasks`)
 
 
     println("----------------------------------------------------------")
@@ -192,13 +192,13 @@ fun calculateTheTask(availableRooms: AvailableRooms?, chosenTask: ChosenTask?): 
     }
 }
 
-fun calculateTheRooms(allRooms : AllRooms?, availableTasks: AvailableTasks?, chosenRooms: ChosenRooms?): TheRooms? {
+fun calculateTheRooms(allRooms : AllRooms?, chosenTask: ChosenTask?, chosenRooms: ChosenRooms?): TheRooms? {
     return when(allRooms) {
         null -> null
         else -> when (chosenRooms) {
-            null -> when (availableTasks) {
+            null -> when (chosenTask) {
                 null -> null
-                else -> allRooms.rooms.filter { r -> (availableTasks.tasks.toSet() - r.possibleTasks).size < availableTasks.tasks.size  }.let { rooms ->
+                else -> allRooms.rooms.filter { r -> r.possibleTasks.contains(chosenTask.task)  }.let { rooms ->
                     rooms.takeUnless { it.isEmpty() }?.let { TheRooms(it) }
                 }
             }
@@ -206,8 +206,6 @@ fun calculateTheRooms(allRooms : AllRooms?, availableTasks: AvailableTasks?, cho
         }
     }
 }
-
-
 
 fun Bus.add(stepName : String, data : Any) {
     add(Action(

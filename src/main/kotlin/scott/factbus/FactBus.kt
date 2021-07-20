@@ -93,7 +93,7 @@ class Bus(private val logView: LogView = LogView()) {
         val data = action.data?.toJson()
         val newLogEntry = LogEntry(key = key, data = data, tracker = Tracker(action.id, action.name))
         val existingEntry = map[action.topic]
-        if (existingEntry?.tracker != newLogEntry.tracker || existingEntry.data != newLogEntry.data) {
+        if ((existingEntry?.data == null && data == null).not() && (existingEntry?.tracker != newLogEntry.tracker || existingEntry.data != newLogEntry.data)) {
             logView.append(newLogEntry)
             map += (key to newLogEntry)
         }
