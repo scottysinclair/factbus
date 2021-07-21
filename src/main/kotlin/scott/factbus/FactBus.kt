@@ -216,10 +216,12 @@ inline fun <reified V1> ScopedBus.stream(topic1: FactTopic<V1>): BStream<StreamD
 inline fun <reified V1,reified V2> ScopedBus.stream(topic1: FactTopic<V1>, topic2: FactTopic<V2>): BStream<StreamData2<V1?,V2?>> {
     return BTopicStream<StreamData2<V1?,V2?>>(this).also {
         subscribe { logEntry ->
-            if (logEntry.key == topic1.url)
-                it.stream(StreamItem(data = StreamData2(logEntry.data?.parse<V1>(), get(topic2)), logEntry = logEntry))
-            else if (logEntry.key == topic2.url)
-                it.stream(StreamItem(data = StreamData2(get(topic1), logEntry.data?.parse<V2>()), logEntry = logEntry))
+            scopeId.toString().let { scope ->
+                when {
+                    scope  == logEntry.scope &&logEntry.key == topic1.url -> it.stream(StreamItem(data = StreamData2(logEntry.data?.parse<V1>(), get(topic2)), logEntry = logEntry))
+                    scope  == logEntry.scope && logEntry.key == topic2.url -> it.stream(StreamItem(data = StreamData2(get(topic1), logEntry.data?.parse<V2>()), logEntry = logEntry))
+                }
+            }
         }
     }
 }
@@ -227,10 +229,12 @@ inline fun <reified V1,reified V2> ScopedBus.stream(topic1: FactTopic<V1>, topic
 inline fun <reified V1,reified V2,reified V3> ScopedBus.stream(topic1: FactTopic<V1>, topic2: FactTopic<V2>, topic3: FactTopic<V3>): BStream<StreamData3<V1?,V2?,V3?>> {
     return BTopicStream<StreamData3<V1?,V2?,V3?>>(this).also {
         subscribe { logEntry ->
-            when {
-                logEntry.key == topic1.url -> it.stream(StreamItem(data = StreamData3(logEntry.data?.parse<V1>(), get(topic2), get(topic3)), logEntry = logEntry))
-                logEntry.key == topic2.url -> it.stream(StreamItem(data = StreamData3(get(topic1), logEntry.data?.parse<V2>(), get(topic3)), logEntry = logEntry))
-                logEntry.key == topic3.url -> it.stream(StreamItem(data = StreamData3(get(topic1), get(topic2), logEntry.data?.parse<V3>()), logEntry = logEntry))
+            scopeId.toString().let { scope ->
+                when {
+                    scope  == logEntry.scope && logEntry.key == topic1.url -> it.stream(StreamItem(data = StreamData3(logEntry.data?.parse<V1>(), get(topic2), get(topic3)), logEntry = logEntry))
+                    scope  == logEntry.scope && logEntry.key == topic2.url -> it.stream(StreamItem(data = StreamData3(get(topic1), logEntry.data?.parse<V2>(), get(topic3)), logEntry = logEntry))
+                    scope  == logEntry.scope && logEntry.key == topic3.url -> it.stream(StreamItem(data = StreamData3(get(topic1), get(topic2), logEntry.data?.parse<V3>()), logEntry = logEntry))
+                }
             }
         }
     }
@@ -256,18 +260,9 @@ inline fun <reified T> String.parse(): T {
   return jacksonObjectMapper().readValue(this, T::class.java)
 }
 
-
-inline fun Any.toJson(): String {
+fun Any.toJson(): String {
     return jacksonObjectMapper().writeValueAsString(this)
 }
-
-operator fun <T> Pair<T, *>?.component1() = this?.component1()
-operator fun <T> Pair<*, T>?.component2() = this?.component2()
-
-operator fun <T> Triple<T,*,*>?.component1() = this?.component1()
-operator fun <T> Triple<*,T,*>?.component2() = this?.component2()
-operator fun <T> Triple<*,*,T>?.component3() = this?.component3()
-
 
 class StreamData1<V1>(val v1 : V1) {
     operator fun component1() = this.v1

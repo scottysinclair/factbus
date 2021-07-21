@@ -33,7 +33,7 @@ data class TheTask(val task: Task)
 data class TheRooms(val rooms: List<Room>)
 
 fun main() {
-    val bus = ScopedBus(scopeId = randomUUID())
+    val sbus = ScopedBus(scopeId = randomUUID())
 
     val `new windows` = Task("new windows")
     val `new doors` = Task("new doors")
@@ -48,40 +48,40 @@ fun main() {
     /**
      *  recalculate the rooms we can choose from
      */
-    bus.stream(Facts.allrooms, Facts.chosentask)
+    sbus.stream(Facts.allrooms, Facts.chosentask)
             .transform { (allRooms, chosenTask) -> calculateAvailableRooms(allRooms, chosenTask) }
             .write(Facts.availablerooms)
 
     /**
      *  recalculate the tasks we can choose from
      */
-    bus.stream(Facts.alltasks, Facts.chosenrooms)
+    sbus.stream(Facts.alltasks, Facts.chosenrooms)
             .transform { (allTasks, chosenRooms) -> calculateAvailableTasks(allTasks, chosenRooms) }
             .write(Facts.availabletasks)
 
     /**
      *  recalculate therooms when chosenrooms, allrooms or availabletasks changes
      */
-    bus.stream(Facts.chosenrooms,Facts.allrooms, Facts.chosentask)
+    sbus.stream(Facts.chosenrooms,Facts.allrooms, Facts.chosentask)
             .transform { (chosenRooms, allRooms, chosenTask) -> calculateTheRooms(allRooms, chosenTask, chosenRooms) }
             .write(Facts.therooms)
 
     /**
      *  recalculate the task to perform based on if it was chosen or if it is the only choice available
      */
-    bus.stream(Facts.chosentask, Facts.availablerooms, Facts.therooms)
+    sbus.stream(Facts.chosentask, Facts.availablerooms, Facts.therooms)
             .transform { (chosenTask, availableRooms, theRooms) -> calculateTheTask(availableRooms, chosenTask, theRooms) }
             .write(Facts.thetask)
 
 
-    bus.add("all rooms", `all rooms`)
-    bus.add("all tasks", `all tasks`)
+    sbus.add("all rooms", `all rooms`)
+    sbus.add("all tasks", `all tasks`)
 
     fun ScopedBus.getRoom(roomName : String) : Room = get(Facts.allrooms)!!.rooms.first { r -> r.name == roomName }
     val `which room do you want` = Question(
             name = "which room do you want?",
-            options = { bus[Facts.availablerooms]?.rooms?.map(Room::name) ?: emptyList() },
-            answer = { answer ->  bus.add("chosen rooms", ChosenRooms(listOf(bus.getRoom(answer)))) },
+            options = { sbus[Facts.availablerooms]?.rooms?.map(Room::name) ?: emptyList() },
+            answer = { answer ->  sbus.add("chosen rooms", ChosenRooms(listOf(sbus.getRoom(answer)))) },
             factToAnswer = Facts.therooms
     )
 
@@ -89,11 +89,11 @@ fun main() {
     println()
     println("----------------------------------------------------------")
     println("                   BUS")
-    bus.map().forEach { (k, v) -> println("$k  =>  ${v?.data}")}
+    sbus.map().forEach { (k, v) -> println("$k  =>  ${v?.data}")}
     println()
     println("----------------------------------------------------------")
     println("                   LOG")
-    bus.logEntries().forEach(::println)
+    sbus.logEntries().forEach(::println)
 
     println(`which room do you want`.name)
     `which room do you want`.options().forEach { o ->
@@ -107,23 +107,23 @@ fun main() {
     println()
     println("----------------------------------------------------------")
     println("                   BUS")
-    bus.map().forEach { (k, v) -> println("$k  =>  ${v?.data}")}
+    sbus.map().forEach { (k, v) -> println("$k  =>  ${v?.data}")}
     println()
     println("----------------------------------------------------------")
     println("                   LOG")
-    bus.logEntries().forEach(::println)
+    sbus.logEntries().forEach(::println)
 
     println()
     println("Undo answering the question........................")
-    bus.back()
+    sbus.back()
     println()
     println("----------------------------------------------------------")
     println("                   BUS")
-    bus.map().forEach { (k, v) -> println("$k  =>  ${v?.data}")}
+    sbus.map().forEach { (k, v) -> println("$k  =>  ${v?.data}")}
     println()
     println("----------------------------------------------------------")
     println("                   LOG")
-    bus.logEntries().forEach(::println)
+    sbus.logEntries().forEach(::println)
 
 
     println("CHOOSING 'HALL'")
@@ -133,11 +133,11 @@ fun main() {
     println()
     println("----------------------------------------------------------")
     println("                   BUS")
-    bus.map().forEach { (k, v) -> println("$k  =>  ${v?.data}")}
+    sbus.map().forEach { (k, v) -> println("$k  =>  ${v?.data}")}
     println()
     println("----------------------------------------------------------")
     println("                   LOG")
-    bus.logEntries().forEach(::println)
+    sbus.logEntries().forEach(::println)
 
 }
 
