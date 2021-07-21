@@ -8,8 +8,11 @@ import kotlin.reflect.full.memberProperties
 import kotlin.reflect.jvm.javaField
 
 data class Tracker(val id :  UUID, val name : String)
-data class LogEntry(val key: String, val data: String?, val tracker: Tracker)
+data class LogEntry(val scope : String, val key: String, val data: String?, val tracker: Tracker)
 
+/**
+ * A Log which can be appended to and can notify consumers of new records.
+ */
 class Log(
         private var entries: List<LogEntry> = emptyList(),
         private var consumers: List<(LogEntry) -> Unit> = emptyList()
@@ -37,6 +40,10 @@ class Log(
         get() = entries.size
 }
 
+/**
+ * A View of a log which can go back and forward in event-time
+ * Appending to the logview when back in time will cause the Log to get forked.
+ */
 class LogView(private var log: Log = Log(), private var mysize: Int = log.length) {
 
     fun logEntries() : List<LogEntry> = log.data.subList(0, mysize)
@@ -48,6 +55,10 @@ class LogView(private var log: Log = Log(), private var mysize: Int = log.length
         if (mysize == log.length)
             log.append(entry) { mysize++ }
         else {
+            /**
+             * TODO: if we share with X and  X.mysize > mysize then NO FORK ALLOWED (can't change shared history)
+             * TODO: remove consumers from the old log
+             */
             log = log.forkAt(mysize)
             log.append(entry) { mysize++ }
         }
@@ -75,56 +86,77 @@ class LogView(private var log: Log = Log(), private var mysize: Int = log.length
         } else false
     }
 
-    fun materialize(): Map<String, LogEntry?> = logEntries().associateBy { entry -> entry.key }
-
     fun add(consumer: (LogEntry) -> Unit) = log.add(consumer)
 }
 
 data class FactTopic<T>(val url : String)
 
+/**
+ * A bus abstraction of a Materialized LogView allowing get, put and subscribe operations
+ */
 class Bus(private val logView: LogView = LogView()) {
 
     var map = logView.materialize()
 
     fun logEntries() : List<LogEntry> = logView.logEntries()
 
-    fun add(action: Action) {
-        val key = action.topic
-        val data = action.data?.toJson()
-        val newLogEntry = LogEntry(key = key, data = data, tracker = Tracker(action.id, action.name))
-        val existingEntry = map[action.topic]
-        if ((existingEntry?.data == null && data == null).not() && (existingEntry?.tracker != newLogEntry.tracker || existingEntry.data != newLogEntry.data)) {
+    inline operator fun <reified V> get(key : String): V? = map[key]?.data?.parse<V>()
+
+    fun add(newLogEntry : LogEntry) {
+        val existingEntry = map[newLogEntry.key]
+        //need to prevent possible infinite ping pong - check if the addition is redundant (the task <-> the room)
+        if ((existingEntry?.data == null && newLogEntry.data == null).not() && (existingEntry?.tracker != newLogEntry.tracker || existingEntry.data != newLogEntry.data)) {
             logView.append(newLogEntry)
-            map += (key to newLogEntry)
+            map += ("${newLogEntry.scope}:${newLogEntry.key}" to newLogEntry)
         }
     }
-
-    inline operator fun <reified V> get(topic: FactTopic<V>): V? = map[topic.url]?.data?.parse<V>()
 
     fun back() = if (logView.back()) true.also { map = logView.materialize() } else false
 
     fun forward() = if (logView.forward()) true.also { map = logView.materialize() } else false
 
     fun subscribe(consumer: (LogEntry) -> Unit) = logView.add(consumer)
+
+    private fun LogView.materialize() = logEntries().associateBy { entry -> "${entry.scope}:${entry.key}" }
+}
+
+class ScopedBus(val bus : Bus = Bus(), val scopeId : UUID = randomUUID()) {
+    inline operator fun <reified V> get(topic: FactTopic<V>): V? = bus.get<V>("${scopeId}:${topic.url}")
+
+    fun add(action: Action) {
+        bus.add(LogEntry(
+                scope = "$scopeId",
+                key = action.topic,
+                data = action.data?.toJson(),
+                tracker = Tracker(action.id, action.name)))
+    }
+
+    fun back() = bus.back()
+
+    fun forward() = bus.forward()
+
+    fun map() : Map<String,LogEntry?> = bus.map.entries.associate { (k,v) -> k.substring(scopeId.toString().length + 1) to v }
+
+    fun logEntries() : List<LogEntry> = bus.logEntries()
+
+    fun subscribe(consumer: (LogEntry) -> Unit) = bus.subscribe(consumer)
 }
 
 
-class Action(val id: UUID = randomUUID(), val name: String, val data: Any?, val topic : String)
-fun action(data : Any, topic : String = getTopic(data), tracker : Tracker) = Action(tracker.id, tracker.name, data, topic = topic)
-fun action(topic : String, tracker : Tracker) = Action(tracker.id, tracker.name, null, topic = topic)
+class Action(val id: UUID = randomUUID(), val name: String, val scopeId : UUID? = null, val data: Any?, val topic : String)
+fun action(data : Any, topic : String = getTopic(data), tracker : Tracker) = Action(tracker.id, tracker.name, null, data, topic = topic)
+fun action(topic : String, tracker : Tracker) = Action(tracker.id, tracker.name, null, null, topic = topic)
 
 class StreamItem<V>(val data : V?, val logEntry : LogEntry)
 
 interface BStream<V> {
-    val bus: Bus
+    val bus: ScopedBus
     fun add(child : (StreamItem<V>) -> Unit)
     fun stream(data : StreamItem<V>)
 }
 
 
-
-class BTopicStream<V>(bus : Bus) : BStream<V> {
-    override val bus: Bus = bus
+class BTopicStream<V>(override val bus : ScopedBus) : BStream<V> {
     private var children = emptyList<(StreamItem<V>) -> Unit>()
     override fun add(child : (StreamItem<V>) -> Unit) {
         children += child
@@ -136,8 +168,8 @@ class BTopicStream<V>(bus : Bus) : BStream<V> {
     }
 }
 
-class BTransformStream<VR,V>(source: BStream<V>, private val transformer: Bus.(V?) -> VR) : BStream<VR> {
-    override val bus: Bus = source.bus
+class BTransformStream<VR,V>(source: BStream<V>, private val transformer: ScopedBus.(V?) -> VR) : BStream<VR> {
+    override val bus: ScopedBus = source.bus
     private var children = emptyList<(StreamItem<VR>) -> Unit>()
     init {
         source.add { streamData ->
@@ -159,7 +191,7 @@ class BTransformStream<VR,V>(source: BStream<V>, private val transformer: Bus.(V
 }
 
 class BWriteStream<V>(source: BStream<V>, private val topic: String) : BStream<V> {
-    override val bus: Bus = source.bus
+    override val bus: ScopedBus = source.bus
     init {
         source.add { streamData ->
             when(streamData.data) {
@@ -172,7 +204,7 @@ class BWriteStream<V>(source: BStream<V>, private val topic: String) : BStream<V
     override fun stream(data: StreamItem<V>) { /* NOOP */ }
 }
 
-inline fun <reified V1> Bus.stream(topic1: FactTopic<V1>): BStream<StreamData1<V1?>> {
+inline fun <reified V1> ScopedBus.stream(topic1: FactTopic<V1>): BStream<StreamData1<V1?>> {
     return BTopicStream<StreamData1<V1?>>(this).also {
         subscribe { logEntry ->
             if (logEntry.key == topic1.url)
@@ -181,7 +213,7 @@ inline fun <reified V1> Bus.stream(topic1: FactTopic<V1>): BStream<StreamData1<V
     }
 }
 
-inline fun <reified V1,reified V2> Bus.stream(topic1: FactTopic<V1>, topic2: FactTopic<V2>): BStream<StreamData2<V1?,V2?>> {
+inline fun <reified V1,reified V2> ScopedBus.stream(topic1: FactTopic<V1>, topic2: FactTopic<V2>): BStream<StreamData2<V1?,V2?>> {
     return BTopicStream<StreamData2<V1?,V2?>>(this).also {
         subscribe { logEntry ->
             if (logEntry.key == topic1.url)
@@ -192,7 +224,7 @@ inline fun <reified V1,reified V2> Bus.stream(topic1: FactTopic<V1>, topic2: Fac
     }
 }
 
-inline fun <reified V1,reified V2,reified V3> Bus.stream(topic1: FactTopic<V1>, topic2: FactTopic<V2>, topic3: FactTopic<V3>): BStream<StreamData3<V1?,V2?,V3?>> {
+inline fun <reified V1,reified V2,reified V3> ScopedBus.stream(topic1: FactTopic<V1>, topic2: FactTopic<V2>, topic3: FactTopic<V3>): BStream<StreamData3<V1?,V2?,V3?>> {
     return BTopicStream<StreamData3<V1?,V2?,V3?>>(this).also {
         subscribe { logEntry ->
             when {
@@ -204,9 +236,7 @@ inline fun <reified V1,reified V2,reified V3> Bus.stream(topic1: FactTopic<V1>, 
     }
 }
 
-fun <V, VR> BStream<V>.transform(transform: Bus.(V?) -> VR): BStream<VR> = BTransformStream(this, transform)
-
-inline fun <V, reified V2, VR> BStream<V>.append(topic: FactTopic<V2>, crossinline appender: (V?, V2?) -> VR): BStream<VR> = BTransformStream(this) { value -> appender(value, bus[topic]) }
+fun <V, VR> BStream<V>.transform(transform: ScopedBus.(V?) -> VR): BStream<VR> = BTransformStream(this, transform)
 
 fun <V> BStream<V>.write(topic: FactTopic<out V>) {
     BWriteStream(this, topic.url)
@@ -238,13 +268,6 @@ operator fun <T> Triple<T,*,*>?.component1() = this?.component1()
 operator fun <T> Triple<*,T,*>?.component2() = this?.component2()
 operator fun <T> Triple<*,*,T>?.component3() = this?.component3()
 
-interface TopicAggregate
-data class TopicAggregate2<V1,V2>(val t1 : FactTopic<V1>, val t2 : FactTopic<V2>) : TopicAggregate
-
-
-interface StreamData {
-    fun from(topicAggregate : TopicAggregate)
-}
 
 class StreamData1<V1>(val v1 : V1) {
     operator fun component1() = this.v1

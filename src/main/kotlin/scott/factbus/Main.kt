@@ -1,5 +1,7 @@
 package scott.factbus
 
+import java.util.UUID.randomUUID
+
 object Facts {
     val allrooms = FactTopic<AllRooms>("fact://allrooms")
     val alltasks = FactTopic<AllTasks>("fact://alltasks")
@@ -11,10 +13,10 @@ object Facts {
     val therooms = FactTopic<TheRooms>("fact://therooms")
 }
 
-class Question(name: String,
-               val options: String, //the topic where we find the options for the question
-               val answer: Any?, //the data of the answer (the question should be republished on the bus with it's answer)
-               val factToAnswer: String //the topic to publish the answer on in it'S own right
+class Question(val name: String,
+               val options: () -> List<String>, //the topic where we find the options for the question
+               val answer: (String) -> Unit, //the data of the answer (the question should be republished on the bus with it's answer)
+               val factToAnswer: FactTopic<*> //the topic to publish the answer on in it'S own right
 )
 
 
@@ -31,7 +33,7 @@ data class TheTask(val task: Task)
 data class TheRooms(val rooms: List<Room>)
 
 fun main() {
-    val bus = Bus()
+    val bus = ScopedBus(scopeId = randomUUID())
 
     val `new windows` = Task("new windows")
     val `new doors` = Task("new doors")
@@ -44,26 +46,18 @@ fun main() {
 
 
     /**
-     *  recalculate available rooms when allrooms or chosentask changes
+     *  recalculate the rooms we can choose from
      */
     bus.stream(Facts.allrooms, Facts.chosentask)
             .transform { (allRooms, chosenTask) -> calculateAvailableRooms(allRooms, chosenTask) }
             .write(Facts.availablerooms)
 
-
     /**
-     *  recalculate available tasks when alltasks or chosenrooms changes
+     *  recalculate the tasks we can choose from
      */
     bus.stream(Facts.alltasks, Facts.chosenrooms)
             .transform { (allTasks, chosenRooms) -> calculateAvailableTasks(allTasks, chosenRooms) }
             .write(Facts.availabletasks)
-
-    /**
-     *  recalculate thetask when chosentask or availablerooms changes
-     */
-    bus.stream(Facts.chosentask, Facts.availablerooms)
-            .transform { (chosenTask, availableRooms) -> calculateTheTask(availableRooms, chosenTask) }
-            .write(Facts.thetask)
 
     /**
      *  recalculate therooms when chosenrooms, allrooms or availabletasks changes
@@ -72,89 +66,77 @@ fun main() {
             .transform { (chosenRooms, allRooms, chosenTask) -> calculateTheRooms(allRooms, chosenTask, chosenRooms) }
             .write(Facts.therooms)
 
-    /*
-     * populate
+    /**
+     *  recalculate the task to perform based on if it was chosen or if it is the only choice available
      */
+    bus.stream(Facts.chosentask, Facts.availablerooms, Facts.therooms)
+            .transform { (chosenTask, availableRooms, theRooms) -> calculateTheTask(availableRooms, chosenTask, theRooms) }
+            .write(Facts.thetask)
+
+
     bus.add("all rooms", `all rooms`)
     bus.add("all tasks", `all tasks`)
 
+    fun ScopedBus.getRoom(roomName : String) : Room = get(Facts.allrooms)!!.rooms.first { r -> r.name == roomName }
+    val `which room do you want` = Question(
+            name = "which room do you want?",
+            options = { bus[Facts.availablerooms]?.rooms?.map(Room::name) ?: emptyList() },
+            answer = { answer ->  bus.add("chosen rooms", ChosenRooms(listOf(bus.getRoom(answer)))) },
+            factToAnswer = Facts.therooms
+    )
 
-    println("----------------------------------------------------------")
-    println("                   READY BUS")
-    bus.map.forEach { (k, v) -> println("$k  =>  ${v?.data}")}
+    println()
     println()
     println("----------------------------------------------------------")
-    println("                   READY LOG")
+    println("                   BUS")
+    bus.map().forEach { (k, v) -> println("$k  =>  ${v?.data}")}
+    println()
+    println("----------------------------------------------------------")
+    println("                   LOG")
+    bus.logEntries().forEach(::println)
+
+    println(`which room do you want`.name)
+    `which room do you want`.options().forEach { o ->
+        println("    $o")
+    }
+    println(":_")
+    println("CHOOSING 'LIVING ROOM'")
+    `which room do you want`.answer("living room")
+
+    println()
+    println()
+    println("----------------------------------------------------------")
+    println("                   BUS")
+    bus.map().forEach { (k, v) -> println("$k  =>  ${v?.data}")}
+    println()
+    println("----------------------------------------------------------")
+    println("                   LOG")
     bus.logEntries().forEach(::println)
 
     println()
-    println()
-
-
-    bus.add("choose new doors", ChosenTask(`new doors`))
-
-    println("------------  RESULT ---------------------------------------")
-    println("Available Rooms after:")
-    bus[Facts.availablerooms]?.rooms?.forEach { print("    $it") }
-    println()
-    println("The Task: ${bus[Facts.thetask]}")
-    println("----------------------------------------------------------")
-    println("                   LOG                                    ")
-    bus.logEntries().forEach(::println)
-
-    println()
-    println()
-
+    println("Undo answering the question........................")
     bus.back()
-    println("------------  BACK RESULT ---------------------------------------")
-    println("Available Rooms after:")
-    bus[Facts.availablerooms]?.rooms?.forEach { print("    $it") }
     println()
-    println("The Task: ${bus[Facts.thetask]}")
     println("----------------------------------------------------------")
-    println("                   BACK LOG                                    ")
-    bus.logEntries().forEach(::println)
-
+    println("                   BUS")
+    bus.map().forEach { (k, v) -> println("$k  =>  ${v?.data}")}
     println()
-    println()
-
-    bus.forward()
-    println("------------  FORWARD RESULT ---------------------------------------")
-    println("Available Rooms after:")
-    bus[Facts.availablerooms]?.rooms?.forEach { print("    $it") }
-    println()
-    println("The Task: ${bus[Facts.thetask]}")
     println("----------------------------------------------------------")
-    println("                   FORWARD LOG                                    ")
-    bus.logEntries().forEach(::println)
-
-    println()
-    println()
-
-    bus.back()
-    println("------------  BACK RESULT ---------------------------------------")
-    println("Available Rooms after:")
-    bus[Facts.availablerooms]?.rooms?.forEach { print("    $it") }
-    println()
-    println("The Task: ${bus[Facts.thetask]}")
-    println("----------------------------------------------------------")
-    println("                   BACK LOG                                    ")
+    println("                   LOG")
     bus.logEntries().forEach(::println)
 
 
-    println("----------------------------------------------------------")
-    println("                   CHOoSING SOMETHING DIFFERENT - FORKING THE LOG!!!!               ")
-    println("----------------------------------------------------------")
+    println("CHOOSING 'HALL'")
+    `which room do you want`.answer("hall")
 
-    bus.add("choose new windows", ChosenTask(`new windows`))
-
-    println("------------  FORK RESULT ---------------------------------------")
-    println("Available Rooms after:")
-    bus[Facts.availablerooms]?.rooms?.forEach { print("    $it") }
     println()
-    println("The Task: ${bus[Facts.thetask]}")
+    println()
     println("----------------------------------------------------------")
-    println("                   FORK LOG                                    ")
+    println("                   BUS")
+    bus.map().forEach { (k, v) -> println("$k  =>  ${v?.data}")}
+    println()
+    println("----------------------------------------------------------")
+    println("                   LOG")
     bus.logEntries().forEach(::println)
 
 }
@@ -180,11 +162,16 @@ fun calculateAvailableTasks(allTasks: AllTasks?, chosenRooms: ChosenRooms?) : Av
 
 }
 
-fun calculateTheTask(availableRooms: AvailableRooms?, chosenTask: ChosenTask?): TheTask? {
+fun calculateTheTask(availableRooms: AvailableRooms?, chosenTask: ChosenTask?, theRooms: TheRooms?): TheTask? {
     return when (chosenTask) {
-        null -> when (availableRooms) {
-            null -> null
-            else -> availableRooms.rooms.flatMap { r -> r.possibleTasks }
+        null -> when (theRooms) {
+            null -> when(availableRooms) {
+                null -> null
+                else -> availableRooms.rooms.flatMap { r -> r.possibleTasks }
+                        .toSet()
+                        .takeIf { it.size == 1 }?.let { TheTask(it.first()) }
+            }
+            else -> theRooms.rooms.flatMap { r -> r.possibleTasks }
                     .toSet()
                     .takeIf { it.size == 1 }?.let { TheTask(it.first()) }
         }
@@ -198,8 +185,11 @@ fun calculateTheRooms(allRooms : AllRooms?, chosenTask: ChosenTask?, chosenRooms
         else -> when (chosenRooms) {
             null -> when (chosenTask) {
                 null -> null
+                /*
+                 * if the chosen task forces exactly 1 room, then we can set 'the room'
+                 */
                 else -> allRooms.rooms.filter { r -> r.possibleTasks.contains(chosenTask.task)  }.let { rooms ->
-                    rooms.takeUnless { it.isEmpty() }?.let { TheRooms(it) }
+                    rooms.takeUnless { it.size == 1 }?.let { TheRooms(it) }
                 }
             }
             else -> TheRooms(chosenRooms.rooms)
@@ -207,7 +197,7 @@ fun calculateTheRooms(allRooms : AllRooms?, chosenTask: ChosenTask?, chosenRooms
     }
 }
 
-fun Bus.add(stepName : String, data : Any) {
+fun ScopedBus.add(stepName : String, data : Any) {
     add(Action(
             name = stepName,
             data = data,
