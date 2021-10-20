@@ -4,7 +4,6 @@ import org.reactivestreams.Publisher
 import org.reactivestreams.Subscriber
 import org.reactivestreams.Subscription
 import java.util.concurrent.atomic.AtomicBoolean
-import javax.lang.model.element.ElementVisitor
 
 /**
  * Provides a FilteredPublisher view on the underlying  Publisher
@@ -151,7 +150,11 @@ class FlatMapPublisher<SOURCE,DEST>(val flatMapper: (SOURCE) -> Publisher<DEST>,
 
 fun <T,DEST> Publisher<T>.flatMap(mapper : (T) -> Publisher<DEST>) : Publisher<DEST> = FlatMapPublisher(mapper, this)
 
-
+/**
+ * Wraps a list of publishers as a single publisher
+ * Subscribes and publishes data from each publisher in order, moving onto the next one
+ * when the previous publisher completes
+ */
 class ConcatPublisher<T>(vararg val publishers: Publisher<T>) : Publisher<T> {
     override fun subscribe(subscriber: Subscriber<in T>) {
         ConcatSubscriber(subscriber, *publishers).start()
@@ -210,6 +213,9 @@ class ConcatPublisher<T>(vararg val publishers: Publisher<T>) : Publisher<T> {
     }
 }
 
+/**
+ * Collects all emitted data into a list which is published when the underlying publication completes
+ */
 class CollectPublisher<T>(val publisher: Publisher<T>) : Publisher<List<T>> {
     override fun subscribe(subscriber: Subscriber<in List<T>>) {
         publisher.subscribe(CollectPublisher(subscriber))
