@@ -9,27 +9,28 @@ import org.reactivestreams.Subscription
  */
 class CollectPublisher<T>(val publisher: Publisher<T>) : Publisher<List<T>> {
     override fun subscribe(subscriber: Subscriber<in List<T>>) {
-        publisher.subscribe(CollectPublisher(subscriber))
-    }
-
-    inner class CollectPublisher(val subscriber: Subscriber<in List<T>>) : Subscriber<T> {
-        private val list = mutableListOf<T>()
-        override fun onSubscribe(subscription: Subscription) {
-            subscriber.onSubscribe(subscription)
-        }
-
-        override fun onNext(event: T) {
-            list.add(event)
-        }
-
-        override fun onError(t: Throwable) = subscriber.onError(t)
-
-        override fun onComplete() {
-            subscriber.onNext(list)
-            subscriber.onComplete()
-        }
+        publisher.subscribe(CollectSubscriber(subscriber))
     }
 }
+
+class CollectSubscriber<T>(val subscriber: Subscriber<in List<T>>) : Subscriber<T> {
+    private val list = mutableListOf<T>()
+    override fun onSubscribe(subscription: Subscription) {
+        subscriber.onSubscribe(subscription)
+    }
+
+    override fun onNext(event: T) {
+        list.add(event)
+    }
+
+    override fun onError(t: Throwable) = subscriber.onError(t)
+
+    override fun onComplete() {
+        subscriber.onNext(list)
+        subscriber.onComplete()
+    }
+}
+
 
 fun <T> Publisher<T>.collectList() : Publisher<List<T>> = CollectPublisher(this)
 
