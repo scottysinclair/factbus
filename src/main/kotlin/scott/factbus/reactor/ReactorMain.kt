@@ -1,10 +1,11 @@
 package scott.factbus.reactor
 
 import org.reactivestreams.Publisher
+import scott.factbus.reactor.core.CorePublisher
+import scott.factbus.reactor.core.subscribe
+import scott.factbus.reactor.operations.*
 
-fun <T> flux() : PublisherOps<T> = CorePublisher()
-
-fun <T> List<Publisher<T>>.toMonoOfList() : Publisher<List<T>> = first().concat(*subList(1, size).toTypedArray()).collectList()
+fun <T> List<Publisher<T>>.toMonoOfList() : Publisher<List<T>> = concat(this).collectList()
 
 fun main(args: Array<String>) {
 
@@ -15,7 +16,7 @@ fun main(args: Array<String>) {
      */
     numberPublisher.filter { it >= 1 && it <= 10 }
         .map { "Matched $it"  }
-        .subscribe { println(it)}
+        .subscribe { println(it) }
 
     /**
      * subscribe to the collection of numbers from 1..10
@@ -28,17 +29,43 @@ fun main(args: Array<String>) {
     .subscribe { println("All numbers from 1 to 10 have been found!!!") } //subscribe and print
 
 
-    /**
-     * subscribe to the collection of numbers from 20..30
+    /*
+     * Subscribe to the collection of numbers from 20..30
+     * The 'mono20_to_30' itself has no lifecycle/state and can be subscribed to / reused as many times as we want
+     * To provde this we will use it twice
      */
-    (20..30).map { i ->  numberPublisher.filter { it == i }.next() }.toMonoOfList().subscribe { println("All numbers from 20 to 30 have been found!!!") }
+    val mono20_to_30 = (20..30).map { i ->  numberPublisher.filter { it == i }.next() }.toMonoOfList()
+
+    /*
+     * once here to subsribe directly and print out when we complete
+     */
+    mono20_to_30.subscribe { numbers -> println("SUB1: All numbers from 20 to 30 have been found!!!: $numbers") }
+    mono20_to_30.subscribe { numbers -> println("SUB2: All numbers from 20 to 30 have been found!!!: $numbers") }
 
 
 
     /**
      * subscribe to 3 specific numbers
      */
-    listOf(10, 35, 90).map { i ->  numberPublisher.filter { it == i }.next() }.toMonoOfList().subscribe { println("10, 35 and 90 have been found!!!") }
+    listOf(10, 35, 90).map { i ->  numberPublisher.filter { it == i }.next() }.toMonoOfList().subscribe { println("10, 35 and 90 have been found!!! $it") }
+
+    /*
+     * flatmap example - currently relies on cheeze being published before numbers because we have no 'toProcessor()' yet
+     */
+    val foodPublisher = CorePublisher<String>()
+    val theNextCheesePublisher = foodPublisher.filter { it == "cheese" }.next()
+    theNextCheesePublisher.flatMap {
+        mono20_to_30.map {
+                nums -> nums.map { n -> "num $n" }
+        }
+    }.subscribe { numbers ->  println("the next cheeze was published and we also got the numbers $numbers") }
+
+
+    /*
+     * Because we don't have toProcessor() yet, we need to publish the food before the numbers for the flatMap to work because the subscription to the mono20_to_30 happens when the next cheese arrives
+     * So we need to have toProcessor() or something to allow buffering
+     */
+    foodPublisher.emitNext("bread").emitNext("cheese").emitNext("sausages")
 
 
     /**
@@ -53,5 +80,8 @@ fun main(args: Array<String>) {
     (1..100).forEach { i ->
         numberPublisher.emitNext(i.also { println("EMIT $it") })
     }
+
+
+
 
 }
