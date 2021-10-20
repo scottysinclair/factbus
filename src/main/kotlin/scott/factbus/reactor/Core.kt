@@ -20,6 +20,8 @@ class CorePublisher<T> : Publisher<T>, PublisherOps<T> {
     fun emitNext(event : T) {
         if (!completed.get()) {
             synchronized(subs) { subs.toTypedArray() }.forEach { it.publish(event) }
+         } else {
+             println("COMPLETED")
          }
     }
 
@@ -34,7 +36,7 @@ class CorePublisher<T> : Publisher<T>, PublisherOps<T> {
     private val terminated = AtomicBoolean(false)
 
      fun publish(event : T) {
-         if (!terminated.get()) queue.add(event)
+         if (!terminated.get()) queue.syncAdd(event)
          drain()
      }
 
@@ -44,7 +46,9 @@ class CorePublisher<T> : Publisher<T>, PublisherOps<T> {
 
      override fun request(numberOfEventsRequested: Long) {
          if (!terminated.get()) {
-             subscribersCapacity += numberOfEventsRequested
+             if (numberOfEventsRequested > Long.MAX_VALUE - subscribersCapacity)
+                 subscribersCapacity = Long.MAX_VALUE
+             else subscribersCapacity += numberOfEventsRequested
          }
     }
 
@@ -56,9 +60,26 @@ class CorePublisher<T> : Publisher<T>, PublisherOps<T> {
     }
 }
 
+class CoreSubscriber<T>(val consumer: (T) -> Unit) : Subscriber<T> {
+    override fun onSubscribe(subscription: Subscription) {
+        subscription.request(Long.MAX_VALUE)
+    }
 
-fun <T> MutableList<T>.syncExtractMax(max : Long) : MutableList<T> = synchronized(this) {
-    subList(0, min(size, max.roundDownToMaxInt())).also { subList -> removeAll(subList)  }
+    override fun onNext(event: T)  = consumer(event)
+
+    override fun onError(t: Throwable?) {
+    }
+
+    override fun onComplete() {
+    }
+}
+
+fun <T> Publisher<T>.subscribe(consumer : (T) -> Unit) = subscribe(CoreSubscriber(consumer))
+
+fun <T> MutableList<T>.syncAdd(value : T) = synchronized(this) { add(value) }
+
+fun <T> MutableList<T>.syncExtractMax(max : Long) : List<T> = synchronized(this) {
+    return subList(0, min(size, max.roundDownToMaxInt())).toList().also { removeAll(it) }
 }
 
 fun Long.roundDownToMaxInt() = min(Int.MAX_VALUE.toLong(), this).toInt()

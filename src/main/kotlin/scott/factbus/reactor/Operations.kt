@@ -4,6 +4,7 @@ import org.reactivestreams.Publisher
 import org.reactivestreams.Subscriber
 import org.reactivestreams.Subscription
 import java.util.concurrent.atomic.AtomicBoolean
+import javax.lang.model.element.ElementVisitor
 
 /**
  * Provides a FilteredPublisher view on the underlying  Publisher
@@ -25,6 +26,7 @@ class FilteredPublisher<T>(val predicate : (T) -> Boolean, val parentPublisher: 
 
         override fun onSubscribe(subscription: Subscription) {
             this.subscription = subscription
+            subscriber.onSubscribe(subscription)
         }
 
         override fun onError(t: Throwable) {
@@ -52,13 +54,12 @@ class MappedPublisher<SOURCE,DEST>(val mapper : (SOURCE) -> DEST, val parentPubl
      * MappedSubscriber which allows Subscribers of type DEST to received transformed data from Publisher of type SOURCE
      */
     inner class MappedSubscriber(val subscriber: Subscriber<in DEST>) : Subscriber<SOURCE> {
-        private lateinit var subscription: Subscription
         override fun onNext(event: SOURCE) {
             subscriber.onNext(mapper(event))
         }
 
         override fun onSubscribe(subscription: Subscription) {
-            this.subscription = subscription
+            subscriber.onSubscribe(subscription)
         }
 
         override fun onError(t: Throwable) {
@@ -79,7 +80,6 @@ fun <SOURCE, DEST> Publisher<SOURCE>.map(mapper: (SOURCE) -> DEST) = MappedPubli
 class MonoPublisher<T>(val parentPublisher: Publisher<T>) : Publisher<T> {
     override fun subscribe(subscriber: Subscriber<in T>) {
         parentPublisher.subscribe(MonoSubscriber(subscriber))
-
     }
 
     inner class MonoSubscriber(val subscriber: Subscriber<in T>) : Subscriber<T> {
@@ -87,14 +87,17 @@ class MonoPublisher<T>(val parentPublisher: Publisher<T>) : Publisher<T> {
         private val terminated = AtomicBoolean(false)
         override fun onNext(event: T) {
             if (!terminated.compareAndExchange(false, true)) {
+//                println("MONO SUBSCRIBER NEXT $event")
                 subscriber.onNext(event)
-                onComplete()
+//                println("MONO SUBSCRIBER COMPLETE $event")
+                subscriber.onComplete()
                 subscription.cancel() //cancel because we have sent our single value
             }
         }
 
         override fun onSubscribe(subscription: Subscription) {
             this.subscription = subscription
+            subscriber.onSubscribe(subscription)
         }
 
         override fun onError(t: Throwable) {
@@ -124,7 +127,6 @@ class FlatMapPublisher<SOURCE,DEST>(val flatMapper: (SOURCE) -> Publisher<DEST>,
     }
 
     inner class FlatMapSubscriber(val subscriber: Subscriber<in DEST>) : Subscriber<SOURCE> {
-        private lateinit var subscription: Subscription
         override fun onNext(event: SOURCE) {
             /*
              * call flatMapper to get the Publisher<DEST> 'P'
@@ -134,7 +136,7 @@ class FlatMapPublisher<SOURCE,DEST>(val flatMapper: (SOURCE) -> Publisher<DEST>,
         }
 
         override fun onSubscribe(subscription: Subscription) {
-            this.subscription = subscription
+            subscriber.onSubscribe(subscription)
         }
 
         override fun onError(t: Throwable) {
@@ -148,3 +150,93 @@ class FlatMapPublisher<SOURCE,DEST>(val flatMapper: (SOURCE) -> Publisher<DEST>,
 }
 
 fun <T,DEST> Publisher<T>.flatMap(mapper : (T) -> Publisher<DEST>) : Publisher<DEST> = FlatMapPublisher(mapper, this)
+
+
+class ConcatPublisher<T>(vararg val publishers: Publisher<T>) : Publisher<T> {
+    override fun subscribe(subscriber: Subscriber<in T>) {
+        ConcatSubscriber(subscriber, *publishers).start()
+    }
+
+    inner class ConcatSubscriber(val subscriber: Subscriber<in T>, vararg  publishers: Publisher<T>) : Subscriber<T>, Subscription {
+        private val iterator = publishers.iterator()
+        private lateinit var currentPublisher : Publisher<T>
+        private lateinit var currentUnderlyingSub : Subscription
+        private var lastNumberOfEventsRequested : Long = 0L
+
+        fun start() {
+            currentPublisher = iterator.next()
+            currentPublisher.subscribe(this) //this as subscriber
+            subscriber.onSubscribe(this)  //this as 'special concat' subscription
+        }
+
+        override fun onNext(event: T) {
+            //println("CONCAT ONNEXT $event")
+            subscriber.onNext(event)
+        }
+
+        override fun onSubscribe(subscription: Subscription) {
+            currentUnderlyingSub = subscription
+            if (lastNumberOfEventsRequested > 0) {
+                currentUnderlyingSub.request(lastNumberOfEventsRequested)
+            }
+        }
+
+        override fun onError(t: Throwable) {
+            subscriber.onError(t)
+        }
+
+        override fun onComplete() {
+            //the current publisher says we are complete, move on..
+            if (iterator.hasNext()) {
+                //println("CONCAT MOVING TO NEXT PUBLISHER")
+                currentPublisher = iterator.next()
+                currentPublisher.subscribe(this)
+            }
+            else {
+                //no more publishers, we are really complete, so propagate it
+                //println("CONCAT FINISHED")
+                subscriber.onComplete()
+            }
+        }
+
+        override fun request(numberOfEventsRequested: Long) {
+            lastNumberOfEventsRequested = numberOfEventsRequested
+            currentUnderlyingSub.request(numberOfEventsRequested)
+        }
+
+        override fun cancel() {
+            currentUnderlyingSub.cancel()
+        }
+    }
+}
+
+class CollectPublisher<T>(val publisher: Publisher<T>) : Publisher<List<T>> {
+    override fun subscribe(subscriber: Subscriber<in List<T>>) {
+        publisher.subscribe(CollectPublisher(subscriber))
+    }
+
+    inner class CollectPublisher(val subscriber: Subscriber<in List<T>>) : Subscriber<T> {
+        private val list = mutableListOf<T>()
+        override fun onSubscribe(subscription: Subscription) {
+            subscriber.onSubscribe(subscription)
+        }
+
+        override fun onNext(event: T) {
+            list.add(event)
+        }
+
+        override fun onError(t: Throwable?) {
+            subscriber.onError(t)
+        }
+
+        override fun onComplete() {
+            subscriber.onNext(list)
+            subscriber.onComplete()
+        }
+    }
+}
+
+fun <T> Publisher<T>.concat(vararg publishers : Publisher<T>) : Publisher<T> = ConcatPublisher(*publishers)
+
+fun <T> Publisher<T>.collectList() : Publisher<List<T>> = CollectPublisher(this)
+
