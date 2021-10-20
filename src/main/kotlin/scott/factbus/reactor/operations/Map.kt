@@ -7,8 +7,7 @@ import org.reactivestreams.Subscription
 /**
  * Provides a MappedPublisher view on the underlying Publisher which publishes mapped data
  */
-class MappedPublisher<SOURCE,DEST>(val mapper : (SOURCE) -> DEST, val parentPublisher: Publisher<SOURCE>) :
-    Publisher<DEST> {
+class MappedPublisher<SOURCE,DEST>(val mapper : (SOURCE) -> DEST, val parentPublisher: Publisher<SOURCE>) : Publisher<DEST> {
     override fun subscribe(subscriber: Subscriber<in DEST>) {
         parentPublisher.subscribe(MappedSubscriber(subscriber))
     }

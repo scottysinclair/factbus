@@ -16,7 +16,7 @@ class FlatMapPublisher<SOURCE,DEST>(val flatMapper: (SOURCE) -> Publisher<DEST>,
     inner class FlatMapSubscriber(val subscriber: Subscriber<in DEST>) : Subscriber<SOURCE> {
         override fun onNext(event: SOURCE) {
             //TODO: I guess we never need to cancel this dynamic subscription,
-            //TODO: I guess we expect the Publisher to complete it when there is no more data, sounds reasonable
+            //TODO: I guess we expect the underlying Publisher (which receives the subscription) to complete it normally when there is no more data, sounds reasonable
             flatMapper(event).subscribe { ev ->  subscriber.onNext(ev) }
         }
 

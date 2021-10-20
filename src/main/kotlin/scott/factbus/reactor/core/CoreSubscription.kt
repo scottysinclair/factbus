@@ -30,7 +30,7 @@ class CoreSubscription<T>(val cancelSub : (Subscription) -> Unit, val subscriber
 
 
     /**
-     * Called to request data from the publisher
+     * The subscriber is requesting the publisher to send some data if it can
      */
     override fun request(numberOfEventsRequested: Long) {
         if (!terminated.get()) {
