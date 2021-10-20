@@ -30,18 +30,17 @@ fun main(args: Array<String>) {
 
 
     /*
-     * Subscribe to the collection of numbers from 20..30
-     * The 'mono20_to_30' itself has no lifecycle/state and can be subscribed to / reused as many times as we want
-     * To provde this we will use it twice
+     * Publisher for the collection of numbers from 20..30
+     * The Publisher itself has no lifecycle/state and can be subscribed to / reused as many times as we want
+     * To prove this we will use it many times
      */
-    val mono20_to_30 = (20..30).map { i ->  numberPublisher.filter { it == i }.next() }.toMonoOfList()
+    val mono20_to_30 = (20..30).map { i ->  numberPublisher.filter { it == i }.next() }.toMonoOfList().buffer()
 
     /*
-     * once here to subsribe directly and print out when we complete
+     * once here to subscribe directly and print out when we complete
      */
     mono20_to_30.subscribe { numbers -> println("SUB1: All numbers from 20 to 30 have been found!!!: $numbers") }
     mono20_to_30.subscribe { numbers -> println("SUB2: All numbers from 20 to 30 have been found!!!: $numbers") }
-
 
 
     /**
@@ -50,7 +49,7 @@ fun main(args: Array<String>) {
     listOf(10, 35, 90).map { i ->  numberPublisher.filter { it == i }.next() }.toMonoOfList().subscribe { println("10, 35 and 90 have been found!!! $it") }
 
     /*
-     * flatmap example - currently relies on cheeze being published before numbers because we have no 'toProcessor()' yet
+     * flatmap example, the next cheeze has to be published and the numbers from 20 to 30 before the subscription will receive anything
      */
     val foodPublisher = CorePublisher<String>()
     val theNextCheesePublisher = foodPublisher.filter { it == "cheese" }.next()
@@ -61,17 +60,10 @@ fun main(args: Array<String>) {
     }.subscribe { numbers ->  println("the next cheeze was published and we also got the numbers $numbers") }
 
 
-    /*
-     * Because we don't have toProcessor() yet, we need to publish the food before the numbers for the flatMap to work because the subscription to the mono20_to_30 happens when the next cheese arrives
-     * So we need to have toProcessor() or something to allow buffering
-     */
-    foodPublisher.emitNext("bread").emitNext("cheese").emitNext("sausages")
-
-
     /**
      * now make the numberPublisher emit some numbers
      */
-    listOf(10, 35, 90).forEach { i ->numberPublisher.emitNext(i) }
+    listOf(10, 35, 90).forEach { i -> numberPublisher.emitNext(i) }
     /*
     (1..5000).forEach {
         numberPublisher.emitNext((1..500).random())
@@ -82,6 +74,11 @@ fun main(args: Array<String>) {
     }
 
 
+    /*
+     * Because we don't have toProcessor() yet, we need to publish the food before the numbers for the flatMap to work because the subscription to the mono20_to_30 happens when the next cheese arrives
+     * So we need to have toProcessor() or something to allow buffering
+     */
+    foodPublisher.emitNext("bread").emitNext("cheese").emitNext("sausages")
 
 
 }

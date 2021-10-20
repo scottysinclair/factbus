@@ -28,7 +28,6 @@ class CoreSubscription<T>(val cancelSub : (Subscription) -> Unit, val subscriber
 
     fun drain() = queue.syncExtractMax(subscribersCapacity.get()).forEach { subscriber.onNext(it).also { subscribersCapacity.decrementAndGet() } }
 
-
     /**
      * The subscriber is requesting the publisher to send some data if it can
      */
