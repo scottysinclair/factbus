@@ -25,7 +25,7 @@ class CorePublisher<T> : Publisher<T> {
      */
     fun emitNext(event : T) : CorePublisher<T> {
         if (!completed.get()) {
-            synchronized(subs) { subs.toTypedArray() }.forEach { it.publish(event) }
+            synchronized(subs) { subs.toList() }.forEach { it.publish(event) }
         } else {
             println("COMPLETED")
         }

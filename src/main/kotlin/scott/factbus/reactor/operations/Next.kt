@@ -15,7 +15,7 @@ class NextPublisher<T>(val parentPublisher: Publisher<T>) : Publisher<T> {
 }
 
 /**
- * Decorates the given Subscriber<T> so that it only receives the next emitted event and then completes
+ * Decorates the given Subscriber<T> so that it only receives the next emitted event and then receives onComplete()
  */
 class NextSubscriber<T>(val subscriber: Subscriber<in T>) : Subscriber<T> {
     private lateinit var subscription: Subscription
