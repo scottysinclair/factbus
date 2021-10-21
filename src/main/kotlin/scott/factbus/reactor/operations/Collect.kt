@@ -5,7 +5,7 @@ import org.reactivestreams.Subscriber
 import org.reactivestreams.Subscription
 
 /**
- * Collects all emitted data into a list which is published when the underlying publication completes
+ * Subscriptions to CollectPublisher will receive all events collected together (List<T>) when the parent Publisher completes.
  */
 class CollectPublisher<T>(val publisher: Publisher<T>) : Publisher<List<T>> {
     override fun subscribe(subscriber: Subscriber<in List<T>>) {
@@ -13,6 +13,9 @@ class CollectPublisher<T>(val publisher: Publisher<T>) : Publisher<List<T>> {
     }
 }
 
+/**
+ * Decorates the Subscriber<List<T>> so that it can subscribe to a Publisher<T> and emit the collected events (List<T>) when Publisher<T> completes
+ */
 class CollectSubscriber<T>(val subscriber: Subscriber<in List<T>>) : Subscriber<T> {
     private val list = mutableListOf<T>()
     override fun onSubscribe(subscription: Subscription) {

@@ -5,7 +5,7 @@ import org.reactivestreams.Subscriber
 import org.reactivestreams.Subscription
 
 /**
- * Provides a MappedPublisher view on the underlying Publisher which publishes mapped data
+ * Subscriptions to MappedPublisher receive DEST events transformed from SOURCE events emitted from the parent Publisher<SOURCE>
  */
 class MappedPublisher<SOURCE, DEST>(val mapper: (SOURCE) -> DEST, val parentPublisher: Publisher<SOURCE>) : Publisher<DEST> {
     override fun subscribe(subscriber: Subscriber<in DEST>) {
@@ -14,7 +14,7 @@ class MappedPublisher<SOURCE, DEST>(val mapper: (SOURCE) -> DEST, val parentPubl
 }
 
 /**
- * MappedSubscriber which allows Subscribers of type DEST to received transformed data from Publisher of type SOURCE
+ * Decorates the given Subscriber<DEST> to present a Subscriber<SOURCE> which can subscribe to Publisher<SOURCE>
  */
 class MappedSubscriber<SOURCE, DEST>(val mapper: (SOURCE) -> DEST, val subscriber: Subscriber<in DEST>) : Subscriber<SOURCE> {
     override fun onNext(event: SOURCE) {

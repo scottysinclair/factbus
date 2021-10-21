@@ -6,7 +6,7 @@ import org.reactivestreams.Subscription
 import java.util.concurrent.atomic.AtomicBoolean
 
 /**
- * Provides a NextPublisher (like a mono) view on an underlying Publisher
+ * Subscriptions to NextPublisher will only receive the single next value from the parent publisher
  */
 class NextPublisher<T>(val parentPublisher: Publisher<T>) : Publisher<T> {
     override fun subscribe(subscriber: Subscriber<in T>) {
@@ -14,14 +14,21 @@ class NextPublisher<T>(val parentPublisher: Publisher<T>) : Publisher<T> {
     }
 }
 
+/**
+ * Decorates the given Subscriber<T> so that it only receives the next emitted event and then completes
+ */
 class NextSubscriber<T>(val subscriber: Subscriber<in T>) : Subscriber<T> {
     private lateinit var subscription: Subscription
     private val terminated = AtomicBoolean(false)
+
+    /**
+     * When the first event is emitted we tell the subscriber we are complete and we cancel our Subscription to the parent Publisher
+     */
     override fun onNext(event: T) {
         if (!terminated.compareAndExchange(false, true)) {
             subscriber.onNext(event)
-            subscriber.onComplete()  //we only publish the next value, so we tell the subscriber that we are complete
-            subscription.cancel() //remove the subscriber from the underlying publisher because he received his single value
+            subscriber.onComplete()
+            subscription.cancel()
         }
     }
 

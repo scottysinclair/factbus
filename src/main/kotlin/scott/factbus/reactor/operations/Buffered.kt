@@ -4,13 +4,12 @@ import org.reactivestreams.Publisher
 import org.reactivestreams.Subscriber
 import org.reactivestreams.Subscription
 import scott.factbus.reactor.core.roundDownToMaxInt
-import java.lang.Math.min
 import java.util.concurrent.atomic.AtomicBoolean
 import java.util.concurrent.atomic.AtomicInteger
 import java.util.concurrent.atomic.AtomicLong
 
 /**
- * Provides a FilteredPublisher view on the underlying  Publisher
+ * Subscriptions to BufferedPublisher will receive all emitted events from the time the BufferedPublisher was created.
  */
 class BufferedPublisher<T>(val parentPublisher: Publisher<T>) : Publisher<T> {
     val bufferedSubscriber = BufferedSubscriber<T>()
@@ -27,14 +26,33 @@ class BufferedPublisher<T>(val parentPublisher: Publisher<T>) : Publisher<T> {
 }
 
 /**
- * Provides a BufferedSubscriber which subsribes to the underlying publisher and starts to buffer data
+ * Subscribes to the parent publisher and collects the emitted events into a buffer
+ * Subscriptions to BufferedPublisher are dynamically added and start to receive events from the buffer in a FIFO manner.
  */
 class BufferedSubscriber<T> : Subscriber<T> {
-    lateinit var realSubscription: Subscription
-    val realPublisherComplete = AtomicBoolean(false)
+    /**
+     * The subscription to the parent Publisher
+     */
+    lateinit var subscriptionToParent: Subscription
+
+    /**
+     * If the parent publisher has completed
+     */
+    private val parentPublisherCompleted = AtomicBoolean(false)
+
+    /**
+     *  BufferedPublisher subscriptions
+     */
     val subscriptions = mutableListOf<BufferedSubscription<T>>()
+
+    /**
+     *  The buffer filled from the subscription to the parent Publisher
+     */
     val buffer = mutableListOf<T>()
 
+    /**
+     * Called to add a BufferedPublisher Subscription
+     */
     fun add(subscriber: Subscriber<in T>) {
         BufferedSubscription(this, subscriber).let {
             subscriptions.add(it)
@@ -54,8 +72,8 @@ class BufferedSubscriber<T> : Subscriber<T> {
      * Called when we are subscribed to the underlying publisher
      */
     override fun onSubscribe(subscription: Subscription) {
-        this.realSubscription = subscription
-        realSubscription.request(Long.MAX_VALUE)
+        this.subscriptionToParent = subscription
+        subscriptionToParent.request(Long.MAX_VALUE)
     }
 
     override fun onError(t: Throwable) = subscriptions.forEach { it.subscriber.onError(t) }
@@ -64,7 +82,7 @@ class BufferedSubscriber<T> : Subscriber<T> {
      * Called when the underlying publisher completes, NOTE: it doesn't mean that WE should forward this... we need to make sure the buffer is drained
      */
     override fun onComplete() {
-        realPublisherComplete.set(true)
+        parentPublisherCompleted.set(true)
         subscriptions.forEach { if (it.fullyDrained()) it.subscriber.onComplete() }
     }
 
@@ -74,25 +92,37 @@ class BufferedSubscriber<T> : Subscriber<T> {
     fun remove(bufferedSubscription: BufferedSubscription<T>) {
         subscriptions.remove(bufferedSubscription)
     }
+
+    fun parentPublisherCompleted() = parentPublisherCompleted.get()
 }
 
 /**
- * Subscription between "our buffer" a given Subscribers which receives the data
+ * A Subscription to the BufferedPublisher
  */
 class BufferedSubscription<T>(val bufferedSubscriber: BufferedSubscriber<T>, val subscriber : Subscriber<in T>) : Subscription{
-    private var subscribersCapacity = AtomicLong(0)
+    /**
+     * The subscriber's current capacity
+     */
+    private val subscribersCapacity = AtomicLong(0)
+
+    /**
+     * How much of the shared buffer we have already emitted to our Subscriber
+     */
     val bufferConsumed = AtomicInteger(0)
 
+    /**
+     * If this subscription has fully emitted all events to our Subscriber
+     */
     fun fullyDrained() = bufferConsumed.get() == bufferedSubscriber.buffer.size
 
     /**
-     * drain the next part of the buffer to the subscriber if it has capacity
+     * Drain the next part of the buffer to the subscriber if it has capacity
      */
+    @Synchronized
     fun drain() {
-        val to = min(bufferedSubscriber.buffer.size, subscribersCapacity.get().roundDownToMaxInt())
-        bufferedSubscriber.buffer.subList(bufferConsumed.get(), to).forEach {
-            subscriber.onNext(it)
-        }
+        val from = bufferConsumed.get()
+        val to = bufferedSubscriber.buffer.size.coerceAtMost(subscribersCapacity.get().roundDownToMaxInt())
+        bufferedSubscriber.buffer.subList(from, to).forEach { subscriber.onNext(it) }
         bufferConsumed.set(to)
     }
 
@@ -104,12 +134,18 @@ class BufferedSubscription<T>(val bufferedSubscriber: BufferedSubscriber<T>, val
             if (numberOfEventsRequested > Long.MAX_VALUE - c) Long.MAX_VALUE
             else c + numberOfEventsRequested
         }
-        if (!bufferedSubscriber.realPublisherComplete.get()) {
-            //TODO: we are not handling capactity here properly
-            bufferedSubscriber.realSubscription.request(numberOfEventsRequested)
+        if (!bufferedSubscriber.parentPublisherCompleted()) {
+            //if the buffer cannot satisfy our subscriber's updated capacity, then request the difference from the parent Publisher
+            val toRequestFromParent = subscribersCapacity.get() - (bufferedSubscriber.buffer.size - bufferConsumed.get())
+            if (toRequestFromParent > 0) {
+                bufferedSubscriber.subscriptionToParent.request(toRequestFromParent)
+            }
         }
+        /*
+         / Use this oppertunity to drain to the Subscriber and even complete if possible
+         */
         drain()
-        if (bufferedSubscriber.realPublisherComplete.get() && fullyDrained()) subscriber.onComplete()
+        if (bufferedSubscriber.parentPublisherCompleted() && fullyDrained()) subscriber.onComplete()
     }
 
     /**

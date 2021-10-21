@@ -5,8 +5,9 @@ import org.reactivestreams.Subscriber
 import org.reactivestreams.Subscription
 
 /**
- * Provides a FilteredPublisher view on the underlying  Publisher
+ * Subscriptions to FilteredPublisher will only receive events which match the given predicate
  */
+
 class FilteredPublisher<T>(val predicate: (T) -> Boolean, val parentPublisher: Publisher<T>) : Publisher<T> {
     override fun subscribe(subscriber: Subscriber<in T>) {
         parentPublisher.subscribe(FilteredSubscriber(predicate, subscriber))
@@ -14,7 +15,7 @@ class FilteredPublisher<T>(val predicate: (T) -> Boolean, val parentPublisher: P
 }
 
 /**
- * Provides a FilteredSubscriber to the underlying Publisher which forwards events to the real subscriber as desired
+ * Decorates the given Subscriber<T> so that only events matching the given predicate are received
  */
 class FilteredSubscriber<T>(val predicate: (T) -> Boolean, val subscriber: Subscriber<in T>) : Subscriber<T> {
     private lateinit var subscription: Subscription
